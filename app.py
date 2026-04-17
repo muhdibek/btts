@@ -16,9 +16,13 @@ Layout:
 
 import sys
 import os
+from pathlib import Path
 
-# Ensure local modules are importable when running via `streamlit run app.py`
-sys.path.insert(0, os.path.dirname(__file__))
+# Ensure local modules are importable regardless of how/where Streamlit launches.
+# os.path.dirname(__file__) can be empty string in some environments — abspath fixes this.
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 import streamlit as st
 import pandas as pd
