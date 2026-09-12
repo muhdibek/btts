@@ -57,6 +57,15 @@ Your browser will open automatically at `http://localhost:8501`
 
 ---
 
+## Sample Data
+
+`data/sample_data.py` ships a 32-fixture card across the Premier League, La Liga, Serie A,
+Bundesliga, Ligue 1 and the Eredivisie, all kicking off **today** (12:00 → ~22:00) so the
+target-odds builder always has a realistic same-day pool to work with. Every club appears
+once. Swap `load_matches()` for the API client (see Upgrade Path) to run on live fixtures.
+
+---
+
 ## How to Use
 
 ### Step 1 — Review All Matches (Section 01)
@@ -71,6 +80,23 @@ The app automatically filters matches based on your **sidebar settings**:
 ### Step 3 — Generate Slips (Section 03)
 Click **⚡ Generate Slips** to build all valid 2-match and 3-match BTTS accumulators.
 Slips are ranked by `score = combined_probability × total_odds`.
+
+### Step 3B — Build a Target Odds Slip (Section 03B)
+Set **Target Total Odds** in the sidebar (default **25.0**) and click
+**🎯 Build 25.00 Odds Slip**.
+
+BTTS prices sit around 1.60–1.95, so a double or treble tops out near 7.0 — reaching a
+payout target needs more legs. The builder searches every 2- to 8-leg combination of the
+filtered matches and returns the five that reach the target, ranked by:
+
+1. slips that actually clear the target
+2. highest combined probability
+3. fewest legs
+4. tightest to the target
+
+No club appears twice in a slip, and each card shows the combined probability and the
+return on your sidebar stake, so a long-odds acca is presented with its real (low)
+chance of landing.
 
 ### Step 4 — Select Your Slip (Section 04)
 Click **Select** on any slip to pin it to the Selected Slip Panel for final review.
@@ -88,6 +114,10 @@ Click **Select** on any slip to pin it to the Selected Slip Panel for final revi
 | Min Total Slip Odds | Accumulator must exceed this |
 | Include 2/3-Match Slips | Toggle slip leg count |
 | Max Slips to Show | Cap displayed results |
+| Target Total Odds | Payout multiple the target slip must reach (e.g. 25.0) |
+| Max Legs in Target Slip | Upper bound on legs used to reach the target (2–8) |
+| Stake (units) | Stake used for the potential-return figures |
+| Today's fixtures only | Restrict the card to matches kicking off today |
 | 🔄 Refresh Data | Clear cache and reload |
 
 ---

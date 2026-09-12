@@ -7,6 +7,8 @@ Applies configurable thresholds to reduce the full match list
 down to only the high-value BTTS candidates.
 """
 
+from datetime import date, datetime
+
 import pandas as pd
 
 
@@ -15,7 +17,7 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 DEFAULT_MIN_BTTS_PROB      = 0.55   # minimum BTTS probability
 DEFAULT_MIN_AVG_SCORED     = 1.10   # at least one team must average ≥ this
-DEFAULT_MAX_AVG_CONCEDED   = 1.80   # at least one team must concede ≥ this
+DEFAULT_MAX_AVG_CONCEDED   = 1.30   # at least one team must concede ≥ this (matches the dashboard default)
 DEFAULT_MIN_BTTS_ODDS      = 1.55   # filter out matches with suspiciously low odds
 DEFAULT_MAX_BTTS_ODDS      = 2.20   # filter out value-less high-odds matches
 
@@ -83,3 +85,33 @@ def get_filter_summary(full_df: pd.DataFrame, filtered_df: pd.DataFrame) -> dict
         "avg_btts_prob":    round(filtered_df["btts_prob"].mean() * 100, 1) if len(filtered_df) else 0,
         "max_btts_prob":    round(filtered_df["btts_prob"].max() * 100, 1) if len(filtered_df) else 0,
     }
+
+
+def filter_todays_matches(df: pd.DataFrame, on_date: date | None = None) -> pd.DataFrame:
+    """
+    Keep only fixtures kicking off on a given calendar day (default: today).
+
+    Works with either a 'kickoff_date' column (YYYY-MM-DD) or by parsing the
+    'kickoff' timestamp, so it also works with API-sourced fixtures that only
+    carry the full kickoff string.
+
+    Args:
+        df:      Match DataFrame
+        on_date: Day to keep (defaults to the local current date)
+
+    Returns:
+        DataFrame containing only that day's fixtures (original order preserved).
+    """
+    if df.empty:
+        return df
+
+    target = on_date or datetime.now().date()
+
+    if "kickoff_date" in df.columns:
+        kickoff_dates = pd.to_datetime(df["kickoff_date"], errors="coerce")
+    else:
+        kickoff_dates = pd.to_datetime(df["kickoff"], errors="coerce")
+
+    # Rows with an unparseable kickoff are dropped rather than silently kept —
+    # a slip should never contain a fixture we cannot date.
+    return df[kickoff_dates.dt.date == target].reset_index(drop=True)

@@ -11,6 +11,7 @@ Layout:
   [Section 1]  All Matches Table
   [Section 2]  Filtered High-Probability Matches
   [Section 3]  Generated Slips
+  [Section 3B] Target Odds Slip (e.g. a 25.00 acca from today's card)
   [Section 4]  Selected Slip Panel
 """
 
@@ -30,8 +31,10 @@ import numpy as np
 
 from data.sample_data       import load_matches
 from models.btts_model      import score_matches, get_confidence_label
-from utils.filters          import filter_high_probability_matches, get_filter_summary
-from utils.slip_generator   import generate_slips, slips_to_dataframe
+from utils.filters          import (filter_high_probability_matches, filter_todays_matches,
+                                   get_filter_summary)
+from utils.slip_generator   import (generate_slips, slips_to_dataframe,
+                                   build_target_odds_slips, potential_return)
 
 
 # ============================================================
@@ -46,9 +49,26 @@ st.set_page_config(
 
 
 # ============================================================
+#  HTML HELPER
+# ============================================================
+def render_html(html: str) -> None:
+    """
+    Render a raw HTML block.
+
+    Streamlit runs the string through Markdown first, and Markdown turns any
+    line indented by 4+ spaces into a code block — which is why HTML written
+    inside an indented f-string shows up as literal tags on the page. Stripping
+    the indentation off every line keeps the markup rendering as markup.
+    """
+    cleaned = "\n".join(line.strip() for line in html.splitlines() if line.strip())
+    st.markdown(cleaned, unsafe_allow_html=True)
+
+
+
+# ============================================================
 #  CUSTOM CSS — Dark tactical theme
 # ============================================================
-st.markdown("""
+render_html("""
 <style>
 /* ---------- Root palette ---------- */
 :root {
@@ -276,7 +296,7 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: var(--accent)
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 </style>
-""", unsafe_allow_html=True)
+""")
 
 
 # ============================================================
@@ -288,13 +308,17 @@ if "slips" not in st.session_state:
     st.session_state.slips = []
 if "slips_generated" not in st.session_state:
     st.session_state.slips_generated = False
+if "target_slips" not in st.session_state:
+    st.session_state.target_slips = []
+if "target_generated" not in st.session_state:
+    st.session_state.target_generated = False
 
 
 # ============================================================
 #  SIDEBAR — filter controls
 # ============================================================
 with st.sidebar:
-    st.markdown("""
+    render_html("""
     <div style="text-align:center; padding: 16px 0 24px 0;">
         <div style="font-size:2rem;">⚽</div>
         <div style="font-size:0.7rem; color:#00e5ff; letter-spacing:0.2em;
@@ -303,7 +327,7 @@ with st.sidebar:
             Local Betting Dashboard
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     st.markdown("---")
 
@@ -341,11 +365,29 @@ with st.sidebar:
     include_trebles  = st.checkbox("Include 3-Match Slips",  value=True)
     max_slips_shown  = st.slider("Max Slips to Show", 5, 30, 15)
 
+    st.markdown("**🎯 Target Odds Slip**")
+    target_odds = st.number_input(
+        "Target Total Odds",
+        min_value=2.0, max_value=200.0, value=25.0, step=1.0,
+        help="Payout multiple the accumulator must reach — e.g. 25.0 for a 25 odds slip"
+    )
+    max_target_legs = st.slider(
+        "Max Legs in Target Slip",
+        min_value=2, max_value=8, value=8,
+        help="BTTS prices around 1.6–1.9 usually need 5–7 legs to reach 25.0"
+    )
+    stake = st.number_input("Stake (units)", min_value=1.0, max_value=1000.0, value=10.0, step=1.0)
+
+    st.markdown("**📅 Match Day**")
+    today_only = st.checkbox("Today's fixtures only", value=True)
+
     st.markdown("---")
     if st.button("🔄  Refresh Data"):
         st.cache_data.clear()
         st.session_state.slips = []
         st.session_state.slips_generated = False
+        st.session_state.target_slips = []
+        st.session_state.target_generated = False
         st.session_state.selected_slip_id = None
         st.rerun()
 
@@ -362,6 +404,10 @@ def get_scored_matches() -> pd.DataFrame:
 
 # Load data
 all_matches_df = get_scored_matches()
+
+# Restrict the card to today's kickoffs before any other filtering
+if today_only:
+    all_matches_df = filter_todays_matches(all_matches_df)
 
 # Apply filters
 slip_sizes = []
@@ -385,7 +431,7 @@ summary = get_filter_summary(all_matches_df, filtered_df)
 # ============================================================
 col_title, col_status = st.columns([3, 1])
 with col_title:
-    st.markdown("""
+    render_html("""
     <div style="padding: 8px 0 4px 0;">
         <span style="font-size:1.6rem; font-weight:800; color:#e8eaf0;
                      letter-spacing:0.05em;">BTTS SLIP</span>
@@ -393,12 +439,12 @@ with col_title:
                      letter-spacing:0.05em;"> AI DASHBOARD</span>
         <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;
                     text-transform:uppercase; letter-spacing:0.15em;">
-            Both Teams To Score · Local Intelligence · Premier League
+            Both Teams To Score · Local Intelligence · Multi-League Card
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 with col_status:
-    st.markdown(f"""
+    render_html(f"""
     <div style="text-align:right; padding-top:12px;">
         <span style="background:#0d2518; border:1px solid #00ff88; color:#00ff88;
                      padding:4px 10px; border-radius:20px; font-size:0.68rem;
@@ -406,9 +452,9 @@ with col_status:
             ● LIVE · {len(all_matches_df)} Fixtures
         </span>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
-st.markdown("<div style='margin-bottom:4px;'></div>", unsafe_allow_html=True)
+render_html("<div style='margin-bottom:4px;'></div>")
 
 # --- Top KPI row ---
 k1, k2, k3, k4, k5 = st.columns(5)
@@ -427,9 +473,9 @@ for col, val, label in kpis:
 # ============================================================
 #  SECTION 1: ALL MATCHES TABLE
 # ============================================================
-st.markdown("""
+render_html("""
 <div class="section-header"><h3>01 · All Upcoming Fixtures</h3></div>
-""", unsafe_allow_html=True)
+""")
 
 def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
     """Render the match list as a styled HTML table."""
@@ -481,7 +527,7 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
         <tbody>{rows_html}</tbody>
     </table>
     """
-    st.markdown(table_html, unsafe_allow_html=True)
+    render_html(table_html)
 
 
 with st.expander("View All Matches", expanded=False):
@@ -491,34 +537,32 @@ with st.expander("View All Matches", expanded=False):
 # ============================================================
 #  SECTION 2: FILTERED HIGH-PROBABILITY MATCHES
 # ============================================================
-st.markdown("""
+render_html("""
 <div class="section-header"><h3>02 · High Probability BTTS Candidates</h3></div>
-""", unsafe_allow_html=True)
+""")
 
 if filtered_df.empty:
-    st.markdown("""
+    render_html("""
     <div style="background:#1a0a0a; border:1px solid #ff444444; border-radius:6px;
                 padding:16px; color:#ff7777; font-size:0.82rem; text-align:center;">
         ⚠️ No matches pass your current filters. Try lowering the BTTS threshold in the sidebar.
     </div>
-    """, unsafe_allow_html=True)
+    """)
 else:
-    st.markdown(
+    render_html(
         f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:8px;'>"
         f"Showing <strong style='color:#00e5ff;'>{len(filtered_df)}</strong> of "
         f"{len(all_matches_df)} fixtures · Filter: BTTS ≥ {min_btts_prob*100:.0f}%"
-        f"</div>",
-        unsafe_allow_html=True
-    )
+        f"</div>")
     render_matches_table(filtered_df, highlight_threshold=0.0)
 
 
 # ============================================================
 #  SECTION 3: SLIP GENERATOR
 # ============================================================
-st.markdown("""
+render_html("""
 <div class="section-header"><h3>03 · Slip Generator</h3></div>
-""", unsafe_allow_html=True)
+""")
 
 gen_col, info_col = st.columns([1, 3])
 
@@ -526,15 +570,13 @@ with gen_col:
     generate_clicked = st.button("⚡  Generate Slips")
 
 with info_col:
-    st.markdown(
+    render_html(
         f"<div style='font-size:0.75rem; color:#8892a4; padding-top:8px;'>"
         f"Generates {'2-match + ' if include_doubles else ''}"
         f"{'3-match ' if include_trebles else ''}combinations · "
         f"Min total odds: <strong style='color:#f5d020;'>{min_total_odds:.1f}</strong> · "
         f"Ranked by: prob × odds"
-        f"</div>",
-        unsafe_allow_html=True
-    )
+        f"</div>")
 
 # Generate slips on button click
 if generate_clicked:
@@ -557,20 +599,18 @@ if st.session_state.slips_generated:
     slips = st.session_state.slips
 
     if not slips:
-        st.markdown("""
+        render_html("""
         <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
                     padding:16px; color:#f5d020; font-size:0.82rem; text-align:center;">
             ⚠️ No slips meet the minimum total odds threshold.
             Try lowering the "Min Total Slip Odds" slider or enabling more matches.
         </div>
-        """, unsafe_allow_html=True)
+        """)
     else:
-        st.markdown(
+        render_html(
             f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:12px;'>"
             f"Found <strong style='color:#00ff88;'>{len(slips)}</strong> qualifying slips"
-            f"</div>",
-            unsafe_allow_html=True
-        )
+            f"</div>")
 
         # Render each slip as a card with a select button
         for slip in slips:
@@ -630,7 +670,7 @@ if st.session_state.slips_generated:
                 </div>
             </div>
             """
-            st.markdown(card_html, unsafe_allow_html=True)
+            render_html(card_html)
 
             # Select button per slip
             btn_label = "✓ Selected" if is_selected else f"Select  {slip['slip_id']}"
@@ -640,24 +680,160 @@ if st.session_state.slips_generated:
 
 
 # ============================================================
+#  SECTION 3B: TARGET ODDS SLIP
+# ============================================================
+render_html("""
+<div class="section-header"><h3>03B · Target Odds Slip</h3></div>
+""")
+
+tgt_col, tgt_info_col = st.columns([1, 3])
+
+with tgt_col:
+    target_clicked = st.button(f"🎯  Build {target_odds:.2f} Odds Slip")
+
+with tgt_info_col:
+    render_html(
+        f"<div style='font-size:0.75rem; color:#8892a4; padding-top:8px;'>"
+        f"Searches 2–{max_target_legs} leg combinations for the "
+        f"<strong style='color:#f5d020;'>highest-probability</strong> acca that reaches "
+        f"<strong style='color:#f5d020;'>{target_odds:.2f}</strong> · "
+        f"no club used twice"
+        f"</div>")
+
+if target_clicked:
+    if filtered_df.empty:
+        st.warning("No filtered matches to build a target slip from. Adjust your filters first.")
+    else:
+        st.session_state.target_slips = build_target_odds_slips(
+            filtered_df = filtered_df,
+            target_odds = target_odds,
+            min_legs    = 2,
+            max_legs    = max_target_legs,
+            max_slips   = 5,
+        )
+        st.session_state.target_generated = True
+        st.session_state.selected_slip_id = None
+
+if st.session_state.target_generated:
+    target_slips = st.session_state.target_slips
+
+    if not target_slips:
+        best_possible = 1.0
+        for o in sorted(filtered_df["btts_odds"], reverse=True)[:max_target_legs]:
+            best_possible *= o
+        render_html(f"""
+        <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
+                    padding:16px; color:#f5d020; font-size:0.82rem;">
+            ⚠️ No combination of today's filtered matches reaches {target_odds:.2f}.
+            The best {max_target_legs}-leg acca available is
+            <strong>{best_possible:.2f}</strong>.<br>
+            <span style="font-size:0.75rem;">
+                Widen the BTTS odds range, lower the probability filter, or raise the max leg
+                count in the sidebar to open up more candidates.
+            </span>
+        </div>
+        """)
+    else:
+        render_html(
+            f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:12px;'>"
+            f"Best <strong style='color:#00ff88;'>{len(target_slips)}</strong> slips for a "
+            f"<strong style='color:#f5d020;'>{target_odds:.2f}</strong> target"
+            f"</div>")
+
+        for slip in target_slips:
+            is_selected    = (st.session_state.selected_slip_id == slip["slip_id"])
+            selected_class = "selected" if is_selected else ""
+
+            legs_html = ""
+            for match, prob, odds, kickoff in zip(
+                slip["matches"], slip["btts_probs"], slip["btts_odds"], slip["kickoffs"]
+            ):
+                _, col = get_confidence_label(prob / 100)
+                legs_html += f"""
+                <div class="match-leg">
+                    <span>{match}
+                        <span style="color:#8892a4; font-size:0.68rem;">
+                            &nbsp;{kickoff[11:]}
+                        </span>
+                    </span>
+                    <span style="display:flex; gap:12px; align-items:center;">
+                        <span class="prob-badge"
+                              style="background:{col}22; color:{col};
+                                     border:1px solid {col}44; font-size:0.73rem;">
+                            {prob}%
+                        </span>
+                        <span style="color:#f5d020; font-weight:700;
+                                     font-size:0.8rem;">{odds}</span>
+                    </span>
+                </div>
+                """
+
+            reach_color = "#00ff88" if slip["clears_target"] else "#f5d020"
+            reach_label = (
+                f"✓ Clears target (+{slip['odds_gap']:.2f})" if slip["clears_target"]
+                else f"Under target ({slip['odds_gap']:.2f})"
+            )
+
+            render_html(f"""
+            <div class="slip-card {selected_class}">
+                <div class="slip-header">
+                    <div>
+                        <span class="slip-id">{slip['slip_id']}</span>
+                        &nbsp;&nbsp;
+                        <span style="background:#1a1030; border:1px solid #7c3aed44;
+                              color:#a78bfa; padding:2px 8px; border-radius:20px;
+                              font-size:0.65rem;">{slip['legs']}-Leg Acca</span>
+                        &nbsp;
+                        <span style="background:{reach_color}22; border:1px solid {reach_color}44;
+                              color:{reach_color}; padding:2px 8px; border-radius:20px;
+                              font-size:0.65rem;">{reach_label}</span>
+                    </div>
+                    <span class="slip-score">Score: {slip['slip_score']:.3f}</span>
+                </div>
+                {legs_html}
+                <div class="slip-footer">
+                    <div>Combined Prob <span class="sf-val">{slip['combined_prob']}%</span></div>
+                    <div>Total Odds <span class="sf-val" style="color:{reach_color};">
+                        {slip['total_odds']}</span></div>
+                    <div>Returns {stake:.0f}u →
+                        <span class="sf-val">{potential_return(slip['total_odds'], stake):.2f}u</span>
+                    </div>
+                </div>
+            </div>
+            """)
+
+            btn_label = "✓ Selected" if is_selected else f"Select  {slip['slip_id']}"
+            if st.button(btn_label, key=f"btn_{slip['slip_id']}"):
+                st.session_state.selected_slip_id = slip["slip_id"]
+                st.rerun()
+
+        render_html(
+            "<div style='font-size:0.7rem; color:#8892a4; margin-top:4px;'>"
+            "A slip this long is a low-probability bet by design — the combined probability "
+            "above is the model's honest estimate of it landing."
+            "</div>")
+
+
+# ============================================================
 #  SECTION 4: SELECTED SLIP PANEL
 # ============================================================
-st.markdown("""
+render_html("""
 <div class="section-header"><h3>04 · Selected Slip</h3></div>
-""", unsafe_allow_html=True)
+""")
 
 if st.session_state.selected_slip_id is None:
-    st.markdown("""
+    render_html("""
     <div style="background:#0d1525; border:1px dashed #1e2d45; border-radius:8px;
                 padding:24px; text-align:center; color:#8892a4; font-size:0.82rem;">
         No slip selected yet.<br>
         <span style="font-size:0.7rem;">Generate slips above and click "Select" on your preferred combination.</span>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 else:
     # Find the selected slip object
     selected = next(
-        (s for s in st.session_state.slips if s["slip_id"] == st.session_state.selected_slip_id),
+        (s for s in (st.session_state.slips + st.session_state.target_slips)
+         if s["slip_id"] == st.session_state.selected_slip_id),
         None
     )
 
@@ -735,6 +911,12 @@ else:
                     <div style="font-size:1.3rem; font-weight:700;
                                 color:#a78bfa;">{selected['legs']}</div>
                 </div>
+                <div>
+                    <div style="font-size:0.65rem; color:#8892a4;
+                                text-transform:uppercase;">Returns on {stake:.0f}u</div>
+                    <div style="font-size:1.3rem; font-weight:700;
+                                color:#f5d020;">{potential_return(selected['total_odds'], stake):.2f}u</div>
+                </div>
             </div>
 
             <div style="margin-top:16px; padding:10px 14px; background:#0a1220;
@@ -746,10 +928,10 @@ else:
             </div>
         </div>
         """
-        st.markdown(panel_html, unsafe_allow_html=True)
+        render_html(panel_html)
 
         # Clear button
-        st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
+        render_html("<div style='margin-top:12px;'></div>")
         if st.button("✕  Clear Selection"):
             st.session_state.selected_slip_id = None
             st.rerun()
@@ -758,11 +940,11 @@ else:
 # ============================================================
 #  FOOTER
 # ============================================================
-st.markdown("""
+render_html("""
 <div style="margin-top:48px; padding-top:16px; border-top:1px solid #1e2d45;
             text-align:center; font-size:0.65rem; color:#4a5568;
             text-transform:uppercase; letter-spacing:0.12em;">
     BTTS Slip AI Dashboard · Local Mode · Heuristic Model v1.0 ·
     Upgrade path: XGBoost + API-Football
 </div>
-""", unsafe_allow_html=True)
+""")
