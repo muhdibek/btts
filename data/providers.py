@@ -64,6 +64,10 @@ class Provider:
     auth_name:   str = "Authorization"    # header name, or query parameter name
     path_style:  str = "path"             # "path": /v1/fixtures · "action": ?action=x
     docs:        str = ""
+    # Some APIs do not return flat rows. The Odds API nests
+    # event → bookmakers → markets → outcomes, which no field map can express,
+    # so a provider may name a parser that flattens its own shape instead.
+    odds_parser: str = ""
 
     def key(self, explicit: str | None = None) -> str:
         value = explicit or os.environ.get(self.key_env, "")
@@ -130,7 +134,99 @@ FIVEDOLLAR = Provider(
     docs="https://api.5dollarfootballapi.com/",
 )
 
-PROVIDERS: dict[str, Provider] = {p.name: p for p in (APIFOOTBALL, FIVEDOLLAR)}
+THEODDSAPI = Provider(
+    name="theoddsapi",
+    base_url="https://api.the-odds-api.com/v4/",
+    key_env="ODDS_API_KEY",
+    auth="query",
+    auth_name="apiKey",
+    path_style="path",
+    endpoints={"sports": "sports", "odds": "sports/{sport}/odds"},
+    odds_parser="theoddsapi",
+    docs="https://the-odds-api.com/liveapi/guides/v4/",
+)
+
+# Sport keys for the leagues this app models. The key in the URL decides the
+# sport entirely: the same credential returns NFL or the Eredivisie depending
+# on this string, which is the easiest thing to get wrong here.
+ODDS_API_SPORTS = {
+    "Premier League": "soccer_epl",
+    "La Liga":        "soccer_spain_la_liga",
+    "Bundesliga":     "soccer_germany_bundesliga",
+    "Serie A":        "soccer_italy_serie_a",
+    "Ligue 1":        "soccer_france_ligue_one",
+    "Eredivisie":     "soccer_netherlands_eredivisie",
+}
+
+PROVIDERS: dict[str, Provider] = {p.name: p
+                                  for p in (APIFOOTBALL, FIVEDOLLAR, THEODDSAPI)}
+
+
+def parse_theoddsapi(payload: Any) -> pd.DataFrame:
+    """
+    Flatten The Odds API's nested response into one row per bookmaker per match.
+
+    Shape: event → bookmakers[] → markets[] → outcomes[]. Outcomes are named by
+    TEAM, not by side, so "which price is the home win" is answered by matching
+    the outcome name against the event's home_team — the away price is not
+    simply the second entry, and the draw is a named outcome rather than a
+    separate market.
+
+    Totals carry a `point`; only the 2.5 line is kept, since that is the one
+    the rest of this repo models.
+    """
+    events = payload if isinstance(payload, list) else payload.get("data", [])
+    rows: list[dict[str, Any]] = []
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        home, away = event.get("home_team"), event.get("away_team")
+
+        for book in event.get("bookmakers") or []:
+            row = {
+                "match_id":  event.get("id"),
+                "kickoff":   event.get("commence_time"),
+                "home_team": home,
+                "away_team": away,
+                "bookmaker": book.get("title") or book.get("key"),
+            }
+
+            for market in book.get("markets") or []:
+                key = market.get("key")
+                for outcome in market.get("outcomes") or []:
+                    name, price = outcome.get("name"), outcome.get("price")
+                    point = outcome.get("point")
+
+                    if key == "h2h":
+                        if name == home:
+                            row["odds_home"] = price
+                        elif name == away:
+                            row["odds_away"] = price
+                        elif isinstance(name, str) and name.lower() == "draw":
+                            row["odds_draw"] = price
+                    elif key == "totals" and point == 2.5:
+                        if isinstance(name, str) and name.lower() == "over":
+                            row["odds_over25"] = price
+                        elif isinstance(name, str) and name.lower() == "under":
+                            row["odds_under25"] = price
+                    elif key == "btts":
+                        if isinstance(name, str) and name.lower() == "yes":
+                            row["odds_btts_yes"] = price
+                        elif isinstance(name, str) and name.lower() == "no":
+                            row["odds_btts_no"] = price
+
+            rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame["kickoff"] = pd.to_datetime(frame["kickoff"], errors="coerce", utc=True)
+        for column in [c for c in frame.columns if c.startswith("odds_")]:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+ODDS_PARSERS = {"theoddsapi": parse_theoddsapi}
 
 
 def get_provider(name: str) -> Provider:
@@ -167,6 +263,15 @@ def request(provider: Provider, endpoint: str, key: str | None = None,
         url = provider.base_url
         query["action"] = resolved
     else:
+        # A path may carry placeholders — "sports/{sport}/odds" — filled from
+        # the call's parameters, which are then not repeated in the query.
+        placeholders = [k for k in query if "{" + k + "}" in resolved]
+        for name in placeholders:
+            resolved = resolved.replace("{" + name + "}", str(query.pop(name)))
+        if "{" in resolved:
+            missing = resolved[resolved.index("{") + 1:resolved.index("}")]
+            raise ProviderError(f"{provider.name}/{endpoint}: missing path parameter "
+                                f"'{missing}'")
         url = provider.base_url.rstrip("/") + "/" + resolved.lstrip("/")
 
     if provider.auth == "bearer":
@@ -231,7 +336,15 @@ def normalise_fixtures(raw: pd.DataFrame, provider: Provider) -> pd.DataFrame:
     return out.sort_values("kickoff").reset_index(drop=True)
 
 
-def normalise_odds(raw: pd.DataFrame, provider: Provider) -> pd.DataFrame:
+def normalise_odds(raw: pd.DataFrame | list, provider: Provider) -> pd.DataFrame:
+    # A provider with its own parser hands over the raw payload, because its
+    # shape is nested and a DataFrame of it would be a frame of dicts.
+    if provider.odds_parser:
+        return ODDS_PARSERS[provider.odds_parser](
+            raw.to_dict("records") if isinstance(raw, pd.DataFrame) else raw)
+
+    if not isinstance(raw, pd.DataFrame):
+        raw = pd.DataFrame(raw)
     if raw.empty:
         return pd.DataFrame(columns=list(provider.odds_map.values()))
 
@@ -312,6 +425,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from", dest="date_from", default=None, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="date_to", default=None, help="YYYY-MM-DD")
     parser.add_argument("--out", default=None, help="probe: write the full sample here")
+    parser.add_argument("--sport", default=None,
+                        help="theoddsapi: sport key, e.g. soccer_epl (NOT the default NFL)")
+    parser.add_argument("--regions", default="eu",
+                        help="theoddsapi: bookmaker regions (default: eu)")
     args = parser.parse_args(argv)
 
     if args.command == "list":
@@ -331,10 +448,14 @@ def main(argv: list[str] | None = None) -> int:
             return probe(provider, args.date_from, args.date_to, args.key, args.out)
 
         endpoint = args.command
-        raw = pd.DataFrame(request(provider, endpoint, key=args.key,
-                                   **{"from": args.date_from, "to": args.date_to}))
+        extra = {"from": args.date_from, "to": args.date_to}
+        if provider.name == "theoddsapi":
+            extra = {"sport": args.sport, "regions": args.regions}
+        payload = request(provider, endpoint, key=args.key, **extra)
+        raw = payload if provider.odds_parser and endpoint == "odds" else pd.DataFrame(payload)
         if endpoint == "fixtures":
-            frame = normalise_fixtures(raw, provider)
+            frame = normalise_fixtures(pd.DataFrame(raw) if not isinstance(raw, pd.DataFrame)
+                                       else raw, provider)
             columns = [c for c in ("kickoff", "league", "home_team", "away_team",
                                    "fthg", "ftag") if c in frame.columns]
         else:

@@ -149,10 +149,29 @@ python -m data.providers probe --provider fivedollar --out sample.json
 python -m data.providers odds  --provider fivedollar --from 2026-10-09
 ```
 
-| Provider | Auth | Key variable |
-|---|---|---|
-| `apifootball` | key in the query string — the URL itself is a secret | `APIFOOTBALL_KEY` |
-| `fivedollar` | `Authorization: Bearer` header | `FIVEDOLLAR_API_KEY` |
+| Provider | Auth | Key variable | Notes |
+|---|---|---|---|
+| `apifootball` | key in the query string — the URL itself is a secret | `APIFOOTBALL_KEY` | flat rows |
+| `fivedollar` | `Authorization: Bearer` header | `FIVEDOLLAR_API_KEY` | flat rows |
+| `theoddsapi` | key in the query string | `ODDS_API_KEY` | nested response, own parser |
+
+**The Odds API needs a sport key**, and it decides the sport entirely — the same
+credential returns the NFL or the Eredivisie depending on one string:
+
+```bash
+export ODDS_API_KEY=your_key
+python -m data.providers odds --provider theoddsapi --sport soccer_epl
+```
+
+`ODDS_API_SPORTS` maps this app's leagues to their keys (`soccer_epl`,
+`soccer_spain_la_liga`, `soccer_germany_bundesliga`, `soccer_italy_serie_a`,
+`soccer_france_ligue_one`, `soccer_netherlands_eredivisie`).
+
+Its response nests event → bookmakers → markets → outcomes, which no field map can
+express, so it has a parser instead. Two details there are easy to get wrong and are
+pinned by tests: outcomes are named by **team**, not by side, and arrive in any order
+— so the home price is found by matching the event's `home_team`, never by position —
+and totals carry a `point`, so the 2.5 line has to be selected rather than assumed.
 
 **The mappings are unverified against live hosts.** They were written where every one
 of these APIs is unreachable, so field names follow each provider's documentation and

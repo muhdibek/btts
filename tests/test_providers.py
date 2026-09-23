@@ -203,3 +203,104 @@ def test_a_new_provider_needs_no_new_code(capture, monkeypatch):
         pd.DataFrame([{"uid": "7", "kickoff_date": "2026-10-10", "h": "X", "a": "Y"}]),
         custom)
     assert out["home_team"].iloc[0] == "X"
+
+
+# ---------------------------------------------------------------------------
+# The Odds API — a nested response no field map can express
+# ---------------------------------------------------------------------------
+
+ODDS_API_EVENT = {
+    "id": "e912a", "sport_key": "soccer_epl",
+    "commence_time": "2026-10-10T14:00:00Z",
+    "home_team": "Arsenal", "away_team": "Leeds United",
+    "bookmakers": [
+        {"key": "pinnacle", "title": "Pinnacle", "markets": [
+            {"key": "h2h", "outcomes": [
+                {"name": "Leeds United", "price": 4.20},     # away listed first
+                {"name": "Arsenal", "price": 1.85},
+                {"name": "Draw", "price": 3.60}]},
+            {"key": "totals", "outcomes": [
+                {"name": "Over", "price": 2.05, "point": 3.5},   # wrong line
+                {"name": "Over", "price": 1.95, "point": 2.5},
+                {"name": "Under", "price": 1.90, "point": 2.5}]},
+        ]},
+        {"key": "bet365", "title": "Bet365", "markets": [
+            {"key": "h2h", "outcomes": [
+                {"name": "Arsenal", "price": 1.91},
+                {"name": "Leeds United", "price": 4.00},
+                {"name": "Draw", "price": 3.50}]},
+        ]},
+    ],
+}
+
+
+def test_odds_api_outcomes_are_read_by_team_not_by_position():
+    """
+    Outcomes are named by TEAM and arrive in any order, so taking the first
+    entry as the home price is wrong — here the away team is listed first.
+    """
+    from data.providers import parse_theoddsapi
+    rows = parse_theoddsapi([ODDS_API_EVENT])
+
+    pinnacle = rows[rows["bookmaker"] == "Pinnacle"].iloc[0]
+    assert pinnacle["odds_home"] == pytest.approx(1.85)
+    assert pinnacle["odds_away"] == pytest.approx(4.20)
+    assert pinnacle["odds_draw"] == pytest.approx(3.60)
+
+
+def test_odds_api_keeps_only_the_two_and_a_half_line():
+    from data.providers import parse_theoddsapi
+    pinnacle = parse_theoddsapi([ODDS_API_EVENT]).iloc[0]
+    assert pinnacle["odds_over25"] == pytest.approx(1.95)      # not the 3.5 line
+    assert pinnacle["odds_under25"] == pytest.approx(1.90)
+
+
+def test_odds_api_gives_one_row_per_bookmaker_and_best_price_picks_across_them():
+    from data.providers import best_prices, parse_theoddsapi
+    rows = parse_theoddsapi([ODDS_API_EVENT])
+    assert len(rows) == 2
+
+    best = best_prices(rows)
+    assert best["max_home"].iloc[0] == pytest.approx(1.91)     # Bet365's
+    assert best["max_away"].iloc[0] == pytest.approx(4.20)     # Pinnacle's
+
+
+def test_odds_api_tolerates_missing_markets_and_empty_payloads():
+    from data.providers import parse_theoddsapi
+    bare = {"id": "x", "home_team": "A", "away_team": "B",
+            "commence_time": "2026-10-10T14:00:00Z",
+            "bookmakers": [{"title": "Book", "markets": []}]}
+    row = parse_theoddsapi([bare]).iloc[0]
+    assert row["bookmaker"] == "Book"
+    assert "odds_home" not in row or pd.isna(row.get("odds_home"))
+    assert parse_theoddsapi([]).empty
+
+
+def test_odds_api_routes_through_its_parser_not_the_field_map():
+    from data.providers import THEODDSAPI, normalise_odds
+    out = normalise_odds([ODDS_API_EVENT], THEODDSAPI)
+    assert out["odds_home"].iloc[0] == pytest.approx(1.85)
+
+
+def test_sport_key_is_substituted_into_the_path(capture, monkeypatch):
+    """The sport key in the URL decides the sport — NFL or the Eredivisie."""
+    from data.providers import THEODDSAPI
+    monkeypatch.setenv("ODDS_API_KEY", "oa_test")
+    request(THEODDSAPI, "odds", sport="soccer_epl", regions="eu")
+    assert capture["url"] == "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+    assert capture["params"]["apiKey"] == "oa_test"
+    assert capture["params"]["regions"] == "eu"
+    assert "sport" not in capture["params"]          # consumed by the path
+
+
+def test_a_missing_path_parameter_is_named(monkeypatch):
+    from data.providers import THEODDSAPI
+    monkeypatch.setenv("ODDS_API_KEY", "oa_test")
+    with pytest.raises(ProviderError, match="missing path parameter 'sport'"):
+        request(THEODDSAPI, "odds")
+
+
+def test_soccer_sport_keys_are_listed_for_the_modelled_leagues():
+    from data.providers import ODDS_API_SPORTS
+    assert ODDS_API_SPORTS["Premier League"] == "soccer_epl"
+    assert all(key.startswith("soccer_") for key in ODDS_API_SPORTS.values())
