@@ -14,7 +14,8 @@ btts_dashboard/
 │
 ├── data/
 │   ├── __init__.py
-│   ├── sample_data.py            ← Dashboard fixtures (Phase 1: mock, Phase 2: API)
+│   ├── sample_data.py            ← Synthetic demo card (fallback source)
+│   ├── live_fixtures.py          ← Live fixtures + real team form (openfootball)
 │   ├── football_data.py          ← football-data.co.uk ingestion + cache
 │   ├── features.py               ← Pre-match feature engineering (leak-free)
 │   └── build_dataset.py          ← CLI: build the labelled training set
@@ -244,6 +245,55 @@ Two rules for whatever trains on this:
 ### Phase 2C — Historical Data Source
 - [football-data.co.uk](https://www.football-data.co.uk) — free CSV files with match results
 - Use to build your labelled training set for the XGBoost model
+
+---
+
+## Live Fixtures
+
+The dashboard defaults to **real fixtures** from the
+[openfootball/football.json](https://github.com/openfootball/football.json) feed —
+public, no API key, auto-updated daily, six leagues (Premier League, La Liga,
+Bundesliga, Serie A, Ligue 1, Eredivisie).
+
+Pick **Live fixtures** or **Sample data** in the sidebar. In live mode you also get
+a league picker and a matchday selector.
+
+**Team form is real.** BTTS rates and scoring/conceding averages are computed from
+each club's last 20 completed matches across this season and last — around 2,200
+results — with a cutoff at the card's first kickoff so no fixture's statistics
+include its own result.
+
+**Three things the UI states plainly, because each would otherwise mislead:**
+
+1. **The odds are fair odds, not market prices.** This feed carries no bookmaker
+   data. Rather than invent prices, the app shows `1 / probability` — the
+   break-even price, no margin. A real book pays *less*, so any return shown is a
+   ceiling, never a payout. Every odds label switches to "Fair Odds" in live mode.
+2. **The probabilities have no measured edge.** See the bake-off results below:
+   backtested on 154k historical matches, this heuristic and four statistical
+   models all scored worse than the league base rate. The banner says so on every
+   live page.
+3. **Kickoff times show as `--:--` when the feed omits them** (some leagues
+   publish dates only) rather than defaulting to a midnight that looks real.
+
+### A feed defect worth knowing about
+
+A minority of matches arrive with a bare-list score (`[0, 0]`) instead of the usual
+`{"ht": …, "ft": …}` object. Across every league-season checked, that form is
+**always exactly 0-0 and never any other scoreline**, while genuine goalless draws
+appear in the object form — so these are placeholders for a result the feed does
+not have, not results.
+
+`data/live_fixtures.py` treats them as unknown and reports the count. Taking them at
+face value would invent goalless draws, push every BTTS rate down and manufacture
+clean sheets — a silent bias in precisely the statistic this app exists to report.
+141 such rows were skipped in the current six-league load.
+
+### Empty matchdays
+
+Football has gaps — international breaks, midweek with no league games. The app
+opens on the **next date with fixtures** rather than on today, and says so when the
+day you picked has none.
 
 ---
 

@@ -30,6 +30,10 @@ import pandas as pd
 import numpy as np
 
 from data.sample_data       import load_matches
+from data.live_fixtures     import (DEFAULT_LEAGUES, LEAGUES as LIVE_LEAGUES,
+                                   available_dates, build_fixture_card, fair_odds,
+                                   feed_status, load_leagues, malformed_score_count,
+                                   next_matchday)
 from models.btts_model      import score_matches, get_confidence_label
 from utils.filters          import (filter_high_probability_matches, filter_todays_matches,
                                    get_filter_summary)
@@ -331,6 +335,30 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # --- Data source ---
+    st.markdown("**📡 Data Source**")
+    source = st.radio(
+        "Fixtures",
+        ["Live fixtures", "Sample data"],
+        index=0,
+        help="Live: real fixtures and real team form from the openfootball feed. "
+             "Sample: the synthetic demo card.",
+        label_visibility="collapsed",
+    )
+    live_mode = source == "Live fixtures"
+    # Live feed has no bookmaker prices, so odds shown are 1 / probability.
+    odds_label = "Fair Odds" if live_mode else "BTTS Odds"
+
+    if live_mode:
+        live_league_codes = st.multiselect(
+            "Leagues",
+            options=list(LIVE_LEAGUES),
+            default=DEFAULT_LEAGUES,
+            format_func=lambda code: LIVE_LEAGUES[code],
+        )
+
+    st.markdown("---")
+
     # --- Filter thresholds ---
     st.markdown("**🎯 Probability Filter**")
     min_btts_prob = st.slider(
@@ -349,11 +377,15 @@ with st.sidebar:
         min_value=0.8, max_value=2.5, value=1.3, step=0.1
     )
 
-    st.markdown("**💰 Odds Range**")
+    st.markdown(f"**💰 {odds_label} Range**")
     odds_range = st.slider(
-        "BTTS Odds Range",
+        f"{odds_label} Range",
         min_value=1.3, max_value=3.0,
-        value=(1.55, 2.20), step=0.05
+        value=(1.30, 3.00) if live_mode else (1.55, 2.20), step=0.05,
+        help=("Fair odds are 1 / probability, so this range is just a probability "
+              "window in disguise — a low ceiling here removes your most likely "
+              "matches, not your worst ones.") if live_mode
+             else "Acceptable bookmaker price window",
     )
 
     st.markdown("**🎰 Slip Settings**")
@@ -378,8 +410,11 @@ with st.sidebar:
     )
     stake = st.number_input("Stake (units)", min_value=1.0, max_value=1000.0, value=10.0, step=1.0)
 
-    st.markdown("**📅 Match Day**")
-    today_only = st.checkbox("Today's fixtures only", value=True)
+    if not live_mode:
+        st.markdown("**📅 Match Day**")
+        today_only = st.checkbox("Today's fixtures only", value=True)
+    else:
+        today_only = False
 
     st.markdown("---")
     if st.button("🔄  Refresh Data"):
@@ -397,17 +432,92 @@ with st.sidebar:
 # ============================================================
 @st.cache_data(ttl=300)
 def get_scored_matches() -> pd.DataFrame:
-    """Load and score all matches (cached for 5 minutes)."""
-    raw_df = load_matches()
-    return score_matches(raw_df)
+    """Load and score the synthetic demo card (cached for 5 minutes)."""
+    return score_matches(load_matches())
 
 
-# Load data
-all_matches_df = get_scored_matches()
+@st.cache_data(ttl=1800)
+def get_live_season(codes: tuple[str, ...]) -> pd.DataFrame:
+    """
+    Every fixture and result for the chosen leagues, this season and last.
 
-# Restrict the card to today's kickoffs before any other filtering
-if today_only:
-    all_matches_df = filter_todays_matches(all_matches_df)
+    Last season is included so team form is not built from three August
+    matches, and it is cached for half an hour — the feed updates daily.
+    """
+    return load_leagues(["2026-27", "2025-26"], codes=list(codes))
+
+
+def add_fair_odds(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill missing prices with fair odds — 1 / probability, no margin.
+
+    The live feed carries no bookmaker odds. Rather than invent prices, the
+    break-even price for the model's own probability is used, and labelled as
+    fair everywhere it appears. A real book prices below this, never above, so
+    any "return" computed from these is an optimistic ceiling and not a payout.
+    """
+    df = df.copy()
+    missing = df["btts_odds"].isna()
+    if missing.any():
+        df.loc[missing, "btts_odds"] = [fair_odds(p) for p in df.loc[missing, "btts_prob"]]
+    return df
+
+
+# ---- Load data ----------------------------------------------------------
+odds_are_fair = False
+live_meta: dict = {}
+
+if live_mode:
+    season_df = get_live_season(tuple(live_league_codes))
+
+    if season_df.empty:
+        st.error("The live fixture feed returned nothing — it may be unreachable "
+                 "from here. Switch to Sample data in the sidebar to keep working.")
+        st.stop()
+
+    upcoming = available_dates(season_df)
+    default_day = next_matchday(season_df)
+
+    with st.sidebar:
+        st.markdown("**📅 Matchday**")
+        if upcoming:
+            chosen_day = st.selectbox(
+                "Date",
+                options=upcoming,
+                index=upcoming.index(default_day) if default_day in upcoming else 0,
+                format_func=lambda d: d.strftime("%a %d %b %Y"),
+                label_visibility="collapsed",
+            )
+        else:
+            chosen_day = None
+            st.caption("No upcoming fixtures in the feed.")
+
+    card_df = build_fixture_card(season_df, on_date=chosen_day)
+
+    if card_df.empty:
+        render_html(f"""
+        <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
+                    padding:16px; color:#f5d020; font-size:0.85rem;">
+            No fixtures on {chosen_day:%A %d %B %Y} in the selected leagues.
+            {"Next matchday: <strong>%s</strong>." % default_day.strftime("%A %d %B")
+             if default_day else ""}
+        </div>
+        """)
+        st.stop()
+
+    all_matches_df = add_fair_odds(score_matches(card_df))
+    odds_are_fair  = True
+    live_meta = {
+        "day":        chosen_day,
+        "leagues":    len(live_league_codes),
+        "results":    int(season_df["played"].sum()),
+        "unusable":   malformed_score_count(season_df),
+        "fetched":    feed_status(["2026-27", "2025-26"], live_league_codes).get("last_fetched"),
+    }
+else:
+    all_matches_df = get_scored_matches()
+    if today_only:
+        all_matches_df = filter_todays_matches(all_matches_df)
 
 # Apply filters
 slip_sizes = []
@@ -431,7 +541,7 @@ summary = get_filter_summary(all_matches_df, filtered_df)
 # ============================================================
 col_title, col_status = st.columns([3, 1])
 with col_title:
-    render_html("""
+    render_html(f"""
     <div style="padding: 8px 0 4px 0;">
         <span style="font-size:1.6rem; font-weight:800; color:#e8eaf0;
                      letter-spacing:0.05em;">BTTS SLIP</span>
@@ -439,17 +549,26 @@ with col_title:
                      letter-spacing:0.05em;"> AI DASHBOARD</span>
         <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;
                     text-transform:uppercase; letter-spacing:0.15em;">
-            Both Teams To Score · Local Intelligence · Multi-League Card
+            Both Teams To Score · Local Intelligence ·
+            {"Live Fixtures" if live_mode else "Synthetic Demo Card"}
         </div>
     </div>
     """)
 with col_status:
+    if live_mode:
+        chip_bg, chip_border, chip_text = "#0d2518", "#00ff88", "#00ff88"
+        chip_label = (f"● LIVE FEED · {live_meta['day']:%a %d %b} · "
+                      f"{len(all_matches_df)} Fixtures")
+    else:
+        chip_bg, chip_border, chip_text = "#1a1400", "#f5d020", "#f5d020"
+        chip_label = f"◌ SAMPLE DATA · {len(all_matches_df)} Fixtures"
+
     render_html(f"""
     <div style="text-align:right; padding-top:12px;">
-        <span style="background:#0d2518; border:1px solid #00ff88; color:#00ff88;
+        <span style="background:{chip_bg}; border:1px solid {chip_border}; color:{chip_text};
                      padding:4px 10px; border-radius:20px; font-size:0.68rem;
                      letter-spacing:0.1em; text-transform:uppercase;">
-            ● LIVE · {len(all_matches_df)} Fixtures
+            {chip_label}
         </span>
     </div>
     """)
@@ -469,6 +588,32 @@ for col, val, label in kpis:
     with col:
         st.metric(label=label, value=val)
 
+
+# ============================================================
+#  DATA PROVENANCE / HONESTY BANNER
+# ============================================================
+if live_mode:
+    fetched = live_meta.get("fetched")
+    render_html(f"""
+    <div style="background:#0d1525; border:1px solid #1e2d45; border-left:2px solid #00e5ff;
+                border-radius:6px; padding:12px 16px; margin:8px 0 4px 0;
+                font-size:0.72rem; color:#8892a4; line-height:1.6;">
+        <strong style="color:#00e5ff;">Real fixtures.</strong>
+        {live_meta['leagues']} leagues · team form built from
+        <strong style="color:#e8eaf0;">{live_meta['results']:,}</strong> completed matches
+        (this season and last){f" · feed fetched {fetched:%d %b %H:%M}" if fetched is not None else ""}
+        {f" · {live_meta['unusable']} matches skipped for unusable scores" if live_meta['unusable'] else ""}.
+        <br>
+        <strong style="color:#f5d020;">Odds below are FAIR odds (1 / probability), not
+        bookmaker prices</strong> — this feed carries no market odds. A real book pays less,
+        so any return shown is a ceiling, not a payout.
+        <br>
+        <strong style="color:#ff9d00;">These probabilities have no measured edge.</strong>
+        Backtested on 154k historical matches, this heuristic and four statistical models all
+        scored worse than simply using the league BTTS base rate. Treat the numbers as
+        descriptive, not predictive — see the README bake-off results.
+    </div>
+    """)
 
 # ============================================================
 #  SECTION 1: ALL MATCHES TABLE
@@ -519,7 +664,7 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
                 <th>League</th>
                 <th>BTTS Prob</th>
                 <th>Signal</th>
-                <th>BTTS Odds</th>
+                <th>{odds_label}</th>
                 <th>Avg Scored H/A</th>
                 <th>Avg Conceded H/A</th>
             </tr>
@@ -664,7 +809,7 @@ if st.session_state.slips_generated:
                 {legs_html}
                 <div class="slip-footer">
                     <div>Combined Prob <span class="sf-val">{slip['combined_prob']}%</span></div>
-                    <div>Total Odds <span class="sf-val" style="color:{odds_color};">
+                    <div>{"Fair Total" if live_mode else "Total Odds"} <span class="sf-val" style="color:{odds_color};">
                         {slip['total_odds']}</span></div>
                     <div>Matches <span class="sf-val">{slip['legs']}</span></div>
                 </div>
@@ -793,7 +938,7 @@ if st.session_state.target_generated:
                 {legs_html}
                 <div class="slip-footer">
                     <div>Combined Prob <span class="sf-val">{slip['combined_prob']}%</span></div>
-                    <div>Total Odds <span class="sf-val" style="color:{reach_color};">
+                    <div>{"Fair Total" if live_mode else "Total Odds"} <span class="sf-val" style="color:{reach_color};">
                         {slip['total_odds']}</span></div>
                     <div>Returns {stake:.0f}u →
                         <span class="sf-val">{potential_return(slip['total_odds'], stake):.2f}u</span>
@@ -883,7 +1028,7 @@ else:
                 </div>
                 <div style="text-align:right;">
                     <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Total Odds</div>
+                                text-transform:uppercase;">{"Fair Total Odds" if live_mode else "Total Odds"}</div>
                     <div style="font-size:2rem; font-weight:800;
                                 color:{odds_color}; line-height:1;">{selected['total_odds']}</div>
                 </div>
