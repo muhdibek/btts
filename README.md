@@ -1,164 +1,255 @@
-# ⚽ BTTS Slip AI Dashboard
+# ⚽ Match Outlook
 
-A **local laptop application** for Both-Teams-To-Score (BTTS) football betting analysis.
-Runs entirely on your machine via Streamlit — no cloud, no Telegram, no subscriptions.
+A local Streamlit dashboard showing today's football fixtures, each side's recent
+form from real results, and a statistical model's probability for the match.
+
+**It is an information tool, not a betting tool** — and that is a conclusion, not
+a disclaimer. It was built as a betting tool. The models were then tested properly,
+against closing bookmaker odds on 17,697 out-of-sample matches, and they lost on
+every outcome. The betting apparatus was removed rather than left in place looking
+authoritative. The evidence is kept in the repo, because a negative result is worth
+keeping.
+
+---
+
+## What it shows
+
+- **Real fixtures** for six European leagues, from the openfootball feed
+- **Real form** — each club's last 20 completed matches across this season and last
+- **Match-result (1X2) or both-teams-to-score probabilities** from a Poisson model
+  fitted per league
+- **The model's strongest calls** for the day — the matches it reads most confidently
+- **International pricing** for any two national teams you choose
+
+No prices, no slips, no stake sizing. Those came out.
+
+---
+
+## Quick Start
+
+```bash
+python -m venv venv && source venv/bin/activate    # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`. Fixtures are fetched at run time; no API key needed.
 
 ---
 
 ## Project Structure
 
 ```
-btts_dashboard/
-│
-├── app.py                        ← Main Streamlit application (run this)
+├── app.py                        ← The dashboard (run this)
 │
 ├── data/
-│   ├── __init__.py
-│   └── sample_data.py            ← Match data loader (Phase 1: mock, Phase 2: API)
+│   ├── live_fixtures.py          ← Live fixtures + real team form (openfootball)
+│   ├── international.py          ← National-team results, ratings and pricing
+│   ├── market_data.py            ← Historical matches WITH bookmaker odds
+│   ├── providers.py              ← One client, several odds APIs (config, not code)
+│   ├── odds_link.py              ← Joins an odds feed to a fixture card
+│   ├── football_data.py          ← football-data.co.uk ingestion + cache
+│   ├── features.py               ← Pre-match feature engineering (leak-free)
+│   ├── build_dataset.py          ← CLI: build the labelled training set
+│   └── sample_data.py            ← Synthetic demo card (offline fallback)
 │
 ├── models/
-│   ├── __init__.py
-│   └── btts_model.py             ← BTTS probability model (Phase 1: heuristic, Phase 2: XGBoost)
+│   ├── goal_models.py            ← Poisson / Dixon-Coles / negative binomial / Skellam
+│   ├── match_result.py           ← 1X2 pricing from per-league Poisson fits
+│   ├── btts_model.py             ← The original heuristic BTTS model
+│   ├── daily_picks.py            ← Ranking the card by model confidence
+│   ├── evaluate.py               ← Log loss, Brier, calibration, AUC, ROI
+│   ├── synthetic.py              ← Match generators with a known process
+│   ├── bakeoff.py                ← CLI: score the models head to head
+│   └── market_test.py            ← CLI: model vs closing odds — the edge test
 │
-├── utils/
-│   ├── __init__.py
-│   ├── filters.py                ← Match filtering logic
-│   ├── slip_generator.py         ← Accumulator slip builder
-│   └── api_client.py             ← API-Football integration (Phase 2)
-│
-├── requirements.txt
-└── README.md
+└── tests/                        ← 78 tests
 ```
 
 ---
 
-## Quick Start
+## The Evidence
 
-### 1. Install dependencies
+Three tests, in the order they were run. Each one narrowed what the app could
+honestly claim.
 
-```bash
-# Create a virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate       # Mac/Linux
-venv\Scripts\activate          # Windows
+### 1. Do the models work at all? (`models/bakeoff.py`)
 
-# Install packages
-pip install -r requirements.txt
-```
+Before trusting a harness on real results, it has to recover a process it was
+handed. `models/synthetic.py` generates matches from a stated process:
 
-### 2. Run the dashboard
-
-```bash
-# From the btts_dashboard/ folder:
-streamlit run app.py
-```
-
-Your browser will open automatically at `http://localhost:8501`
-
----
-
-## How to Use
-
-### Step 1 — Review All Matches (Section 01)
-Expand the fixtures table to see all upcoming matches with BTTS probability, odds, and signal labels.
-
-### Step 2 — Use Filtered Matches (Section 02)
-The app automatically filters matches based on your **sidebar settings**:
-- Minimum BTTS probability (default 62%)
-- Attack/defence thresholds
-- Odds range
-
-### Step 3 — Generate Slips (Section 03)
-Click **⚡ Generate Slips** to build all valid 2-match and 3-match BTTS accumulators.
-Slips are ranked by `score = combined_probability × total_odds`.
-
-### Step 4 — Select Your Slip (Section 04)
-Click **Select** on any slip to pin it to the Selected Slip Panel for final review.
-
----
-
-## Sidebar Controls
-
-| Control | Description |
+| Data generated from | Result |
 |---|---|
-| Min BTTS Probability | Only show matches above this threshold |
-| Min Avg Goals Scored | Attack strength filter |
-| Min Avg Goals Conceded | Defensive weakness filter |
-| BTTS Odds Range | Acceptable odds window |
-| Min Total Slip Odds | Accumulator must exceed this |
-| Include 2/3-Match Slips | Toggle slip leg count |
-| Max Slips to Show | Cap displayed results |
-| 🔄 Refresh Data | Clear cache and reload |
+| Poisson | all three tie; negative binomial's `r` hits its ceiling, correctly saying "this is Poisson" |
+| Negative binomial (r = 2.5) | negative binomial wins 4/5 runs, recovers r = 3.3 |
+| Dixon-Coles (ρ = −0.30) | Dixon-Coles wins 5/5, recovers ρ = −0.30 |
+
+The harness works.
+
+### 2. Which markets have signal? (`--walk-forward`, 154k real matches)
+
+Walk-forward over 8,770 out-of-sample Premier League matches, refitting each season:
+
+| Market | Best model | AUC | Skill vs base rate |
+|---|---|---|---|
+| **Match result** | Poisson | **0.672** | **+6.9%** |
+| Both teams to score | — | 0.513 | **negative** — worse than the base rate |
+
+Team strength predicts *who wins*. It does not predict *whether both teams score* —
+a strong side beating a weak one 3-0 rather than 3-1 is close to a coin toss, and
+BTTS turns entirely on that coin.
+
+### 3. Does it beat the market? (`models/market_test.py`)
+
+The base rate is a weak opponent. A closing price is not — on this data it is
+almost perfectly calibrated (implied 44.6% home wins against 44.7% actual).
+
+Walk-forward across six leagues, 2012 → September 2026, **17,697 out-of-sample
+matches**, betting at the best price available:
+
+| Outcome | Model log loss | Market log loss | Model AUC | Market AUC | Bets | ROI | t |
+|---|---|---|---|---|---|---|---|
+| Home | 0.6265 | **0.5989** | 0.694 | **0.731** | 9,775 | **−4.6%** | −2.91 |
+| Draw | 0.5587 | **0.5533** | 0.565 | **0.585** | 5,614 | −0.3% | −0.12 |
+| Away | 0.5657 | **0.5411** | 0.701 | **0.739** | 8,887 | −2.9% | −1.24 |
+
+**The model loses on all three, and the home-win loss is statistically significant.**
+
+`roi_t` is the ROI in standard errors from break-even, and it earns its place: on the
+Premier League alone the model showed a **+4.1% ROI on draws** — the kind of number
+that starts a betting system. Its t was 0.71. Across six leagues it was −0.3%.
+
+```bash
+python -m models.market_test --since 2012-01-01
+python -m models.bakeoff --data data/processed/btts_dataset.csv --division E0 --walk-forward
+python -m models.bakeoff --synthetic negative_binomial --repeats 5
+```
 
 ---
 
-## Probability Model (Phase 1)
+## Data Sources
 
-The current model blends three signals:
-
-```
-P(BTTS) = 0.40 × P_poisson + 0.45 × P_historical + 0.15 × P_composite
-```
-
-| Signal | Weight | Method |
+| Source | Used for | Notes |
 |---|---|---|
-| Poisson xG model | 40% | Independent Poisson distributions for each team |
-| Historical BTTS rate | 45% | Average of each team's last-20-match BTTS% |
-| Attack/defence composite | 15% | Normalised scoring × conceding interaction |
+| [openfootball/football.json](https://github.com/openfootball/football.json) | Live fixtures + form | Public, no key, auto-updated daily |
+| [martj42/international_results](https://github.com/martj42/international_results) | National-team ratings | 49k results since 1872, neutral-venue flags |
+| [xgabora/Club-Football-Match-Data](https://github.com/xgabora/Club-Football-Match-Data-2000-2025) | Market test | ~239k matches with closing odds, current to weeks |
+| [football-data.co.uk](https://www.football-data.co.uk) | Training datasets | Via a public mirror; the site itself is unreachable from some environments |
+
+### Forward odds
+
+`data/providers.py` talks to any of the odds APIs. A provider is **configuration, not
+code** — base URL, where the key goes, endpoint names, field mapping — so adding one is
+a dict and correcting one after seeing a real response is two lines.
+
+```bash
+python -m data.providers list                          # who is configured
+export FIVEDOLLAR_API_KEY=your_key
+python -m data.providers probe --provider fivedollar --out sample.json
+python -m data.providers odds  --provider fivedollar --from 2026-10-09
+```
+
+| Provider | Auth | Key variable | Notes |
+|---|---|---|---|
+| `apifootball` | key in the query string — the URL itself is a secret | `APIFOOTBALL_KEY` | flat rows |
+| `fivedollar` | `Authorization: Bearer` header | `FIVEDOLLAR_API_KEY` | flat rows |
+| `theoddsapi` | key in the query string | `ODDS_API_KEY` | nested response, own parser |
+
+**The Odds API needs a sport key**, and it decides the sport entirely — the same
+credential returns the NFL or the Eredivisie depending on one string:
+
+```bash
+export ODDS_API_KEY=your_key
+python -m data.providers odds --provider theoddsapi --sport soccer_epl
+```
+
+`ODDS_API_SPORTS` maps this app's leagues to their keys (`soccer_epl`,
+`soccer_spain_la_liga`, `soccer_germany_bundesliga`, `soccer_italy_serie_a`,
+`soccer_france_ligue_one`, `soccer_netherlands_eredivisie`).
+
+Its response nests event → bookmakers → markets → outcomes, which no field map can
+express, so it has a parser instead. Two details there are easy to get wrong and are
+pinned by tests: outcomes are named by **team**, not by side, and arrive in any order
+— so the home price is found by matching the event's `home_team`, never by position —
+and totals carry a `point`, so the 2.5 line has to be selected rather than assumed.
+
+**The mappings are unverified against live hosts.** They were written where every one
+of these APIs is unreachable, so field names follow each provider's documentation and
+parsing is deliberately tolerant: a renamed field costs one NaN column, never the run.
+`probe` prints what actually came back plus a field-by-field mapping check, and names
+the keys it did see — so a mismatch is a two-line fix rather than a debugging session.
+
+Once a provider is reachable, `data/odds_link.py` joins its prices to the fixture
+card. Feeds disagree on club names — "Manchester Utd", "Manchester United FC" and
+"Man United" are one club — so names are normalised and fuzzy-matched, both sides of
+a fixture must match, and same-day matching stops a reverse fixture months away from
+linking. **Anything still unmatched is reported, not dropped**: a page showing prices
+for two thirds of its card with nothing saying which third is worse than one showing
+none.
+
+`add_market_comparison()` then puts the model's probability beside the market's and
+the gap between them. Read that gap as *how far off consensus a call is* — not as a
+signal. When the two disagree the market is usually right: this model lost 4.6%
+flat-staking its disagreements, and an independent published model lost 15.2% over
+3,834 bets.
+
+Other odds routes tried and closed: football-data.co.uk (historical only), the
+football-charts connector (free tier excludes odds — the archive is paid),
+the-odds-api / football-data.org / footballdata.io / sofascore (all blocked by the
+environment's network policy).
 
 ---
 
-## Upgrade Path
+## Notes on the Data
 
-### Phase 2A — Real API Data
+Three defects worth knowing about, each found by testing and handled explicitly:
 
-1. Sign up at [api-football.com](https://www.api-football.com) (free tier: 100 req/day)
-2. Create `.env` file:
-   ```
-   API_FOOTBALL_KEY=your_key_here
-   ```
-3. In `data/sample_data.py`, replace `load_matches()` with:
-   ```python
-   from utils.api_client import fetch_upcoming_fixtures
-   return fetch_upcoming_fixtures(league_id=39, season=2024)
-   ```
+- **openfootball score placeholders.** A minority of matches carry a bare-list score
+  instead of the usual object, and across every league-season checked that form is
+  *always exactly `[0, 0]`*. Genuine goalless draws appear in the object form, so
+  these are placeholders. Counted as results they would invent goalless draws and
+  drag every BTTS rate down. They are treated as unknown and reported (141 skipped
+  in the current six-league load).
+- **Missing kickoff times.** Some leagues publish dates only; those show as `--:--`
+  rather than a midnight that looks real.
+- **Extrapolated ratings.** Asking the international model for the best side in the
+  world against the weakest produced 14 expected goals — not football, and it
+  degenerates the scoreline grid. Rates are clamped to a range real matches occupy.
 
-### Phase 2B — XGBoost Model
+**Leakage discipline.** `data/features.py` makes one chronological pass and reads each
+team's history *before* appending the current match to it. `tests/test_dataset.py`
+asserts that invariant directly: a leaked feature backtests beautifully, loses money,
+and never shows up in the accuracy numbers.
 
-1. Collect labelled match data (features + BTTS outcome 0/1)
-2. Train:
-   ```python
-   import xgboost as xgb
-   model = xgb.XGBClassifier(n_estimators=300, max_depth=5, learning_rate=0.05)
-   model.fit(X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=30)
-   import joblib; joblib.dump(model, "models/btts_xgb_model.pkl")
-   ```
-3. In `models/btts_model.py`, replace `predict_btts_probability()` body:
-   ```python
-   model = joblib.load("models/btts_xgb_model.pkl")
-   features = np.array([row.home_avg_scored, row.away_avg_scored, ...])
-   return float(model.predict_proba([features])[0][1])
-   ```
+---
 
-### Phase 2C — Historical Data Source
-- [football-data.co.uk](https://www.football-data.co.uk) — free CSV files with match results
-- Use to build your labelled training set for the XGBoost model
+## International Matches
+
+Pick **International (manual)** in the sidebar and choose any two national teams.
+
+**Why manual?** No reachable source lists upcoming international fixtures — five were
+checked. What exists is history, so the model can be fitted; it just has nothing to
+point itself at.
+
+Neutral venues drop the home-advantage term (pairings default to neutral, since a
+made-up fixture has no host). Thin data is handled with a date window, time decay,
+friendlies at half weight and ridge shrinkage. **Nothing here has been backtested on
+international football** — the validation was on club leagues, and the page says so.
 
 ---
 
 ## Responsible Gambling Note
 
-This dashboard is a **probability analysis tool** for research and educational purposes.
-No model guarantees outcomes. Always gamble responsibly within your means.
+This dashboard reports probabilities for interest and context. It is not betting
+advice, and the evidence above is explicit that these models do not beat bookmaker
+prices. If you gamble, do it with money you can afford to lose.
 
 ---
 
 ## Tech Stack
 
-- **Python 3.10+**
-- **Streamlit** — UI framework
-- **Pandas / NumPy** — data manipulation
-- **Scikit-learn** — Phase 1 utilities
-- **XGBoost** — Phase 2 model
-- **Requests + python-dotenv** — API integration
-- **itertools** — combination generation
+Python 3.10+ · Streamlit · pandas / NumPy · SciPy (maximum-likelihood fitting)
+
+```bash
+python -m pytest tests/ -q      # 78 tests
+```

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.cache/
+venv/
+
+# Downloaded + derived data (rebuild with `python -m data.build_dataset`)
+data/raw/
+data/processed/
+data/.cache_live/
