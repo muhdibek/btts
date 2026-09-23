@@ -46,7 +46,7 @@ Opens at `http://localhost:8501`. Fixtures are fetched at run time; no API key n
 │   ├── live_fixtures.py          ← Live fixtures + real team form (openfootball)
 │   ├── international.py          ← National-team results, ratings and pricing
 │   ├── market_data.py            ← Historical matches WITH bookmaker odds
-│   ├── apifootball.py            ← APIFootball v3 client (forward odds)
+│   ├── providers.py              ← One client, several odds APIs (config, not code)
 │   ├── odds_link.py              ← Joins an odds feed to a fixture card
 │   ├── football_data.py          ← football-data.co.uk ingestion + cache
 │   ├── features.py               ← Pre-match feature engineering (leak-free)
@@ -138,22 +138,27 @@ python -m models.bakeoff --synthetic negative_binomial --repeats 5
 
 ### Forward odds
 
-`data/apifootball.py` is a client for [APIFootball v3](https://apiv3.apifootball.com),
-the one source tried here that carries **bookmaker odds for matches not yet played**.
-Prices are what turn "the model says 62%" into "the model says 62%, the market says
-55%" — the difference between a description and a claim.
+`data/providers.py` talks to any of the odds APIs. A provider is **configuration, not
+code** — base URL, where the key goes, endpoint names, field mapping — so adding one is
+a dict and correcting one after seeing a real response is two lines.
 
 ```bash
-export APIFOOTBALL_KEY=your_key
-python -m data.apifootball probe --out sample.json     # check the payload shape
-python -m data.apifootball odds --from 2026-10-09 --to 2026-10-12
+python -m data.providers list                          # who is configured
+export FIVEDOLLAR_API_KEY=your_key
+python -m data.providers probe --provider fivedollar --out sample.json
+python -m data.providers odds  --provider fivedollar --from 2026-10-09
 ```
 
-**It is unverified against the live API.** It was written in an environment where the
-host is unreachable, so requests follow the documented API and parsing is deliberately
-tolerant: a renamed field costs one NaN column rather than the run, and `probe` prints
-what actually came back. Run `probe` first — its mapping check says how many expected
-fields were present.
+| Provider | Auth | Key variable |
+|---|---|---|
+| `apifootball` | key in the query string — the URL itself is a secret | `APIFOOTBALL_KEY` |
+| `fivedollar` | `Authorization: Bearer` header | `FIVEDOLLAR_API_KEY` |
+
+**The mappings are unverified against live hosts.** They were written where every one
+of these APIs is unreachable, so field names follow each provider's documentation and
+parsing is deliberately tolerant: a renamed field costs one NaN column, never the run.
+`probe` prints what actually came back plus a field-by-field mapping check, and names
+the keys it did see — so a mismatch is a two-line fix rather than a debugging session.
 
 Once a provider is reachable, `data/odds_link.py` joins its prices to the fixture
 card. Feeds disagree on club names — "Manchester Utd", "Manchester United FC" and
