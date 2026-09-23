@@ -47,6 +47,7 @@ Opens at `http://localhost:8501`. Fixtures are fetched at run time; no API key n
 │   ├── international.py          ← National-team results, ratings and pricing
 │   ├── market_data.py            ← Historical matches WITH bookmaker odds
 │   ├── apifootball.py            ← APIFootball v3 client (forward odds)
+│   ├── odds_link.py              ← Joins an odds feed to a fixture card
 │   ├── football_data.py          ← football-data.co.uk ingestion + cache
 │   ├── features.py               ← Pre-match feature engineering (leak-free)
 │   ├── build_dataset.py          ← CLI: build the labelled training set
@@ -153,6 +154,20 @@ host is unreachable, so requests follow the documented API and parsing is delibe
 tolerant: a renamed field costs one NaN column rather than the run, and `probe` prints
 what actually came back. Run `probe` first — its mapping check says how many expected
 fields were present.
+
+Once a provider is reachable, `data/odds_link.py` joins its prices to the fixture
+card. Feeds disagree on club names — "Manchester Utd", "Manchester United FC" and
+"Man United" are one club — so names are normalised and fuzzy-matched, both sides of
+a fixture must match, and same-day matching stops a reverse fixture months away from
+linking. **Anything still unmatched is reported, not dropped**: a page showing prices
+for two thirds of its card with nothing saying which third is worse than one showing
+none.
+
+`add_market_comparison()` then puts the model's probability beside the market's and
+the gap between them. Read that gap as *how far off consensus a call is* — not as a
+signal. When the two disagree the market is usually right: this model lost 4.6%
+flat-staking its disagreements, and an independent published model lost 15.2% over
+3,834 bets.
 
 Other odds routes tried and closed: football-data.co.uk (historical only), the
 football-charts connector (free tier excludes odds — the archive is paid),
