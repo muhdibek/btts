@@ -1,57 +1,63 @@
 """
 app.py
 ------
-BTTS Slip AI Dashboard — Main Streamlit Application
+Football Match Outlook — an information dashboard.
 
 Run with:
     streamlit run app.py
 
+What this is: today's fixtures, each side's recent form from real results, and
+a model's probability for the match. That is all it claims to be.
+
+What it is NOT, and used to be: a betting tool. It was built as one, and then
+the models were tested properly — walk-forward, against closing bookmaker odds,
+on 17,697 out-of-sample matches. They lost on every outcome, and the home-win
+loss was statistically significant (ROI -4.6%, t = -2.91). The betting
+apparatus was removed rather than left in place looking authoritative.
+
+The evidence is still in the repo (models/market_test.py, models/bakeoff.py)
+because a negative result is worth keeping. See the README.
+
 Layout:
-  [Sidebar]    Filter controls
-  [Section 1]  All Matches Table
-  [Section 2]  Filtered High-Probability Matches
-  [Section 3]  Generated Slips
-  [Section 3B] Target Odds Slip (e.g. a 25.00 acca from today's card)
-  [Section 4]  Selected Slip Panel
+  [Sidebar]    Source, market, leagues, matchday
+  [Section 1]  The model's strongest calls
+  [Section 2]  Every fixture, with form
+  [Panel]      International pricing (manual pairing)
 """
 
 import sys
-import os
 from pathlib import Path
 
 # Ensure local modules are importable regardless of how/where Streamlit launches.
-# os.path.dirname(__file__) can be empty string in some environments — abspath fixes this.
 _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import streamlit as st
 
 from data.sample_data       import load_matches
 from data.live_fixtures     import (DEFAULT_LEAGUES, LEAGUES as LIVE_LEAGUES,
-                                   available_dates, build_fixture_card, fair_odds,
-                                   feed_status, load_leagues, malformed_score_count,
-                                   next_matchday)
-from models.btts_model      import score_matches, get_confidence_label
-from models.match_result     import build_match_result_card
-from models.daily_picks      import (build_daily_slips, confidence_band,
-                                    rank_picks, summarise_card)
+                                    available_dates, build_fixture_card,
+                                    feed_status, load_leagues,
+                                    malformed_score_count, next_matchday)
 from data.international     import (DEFAULT_SINCE, fit_international_model,
-                                   load_results, price_fixture, rateable_teams,
-                                   recent_form, team_match_counts)
-from utils.filters          import (filter_high_probability_matches, filter_todays_matches,
-                                   get_filter_summary)
-from utils.slip_generator   import (generate_slips, slips_to_dataframe,
-                                   build_target_odds_slips, potential_return)
+                                    load_results, price_fixture, rateable_teams,
+                                    recent_form, team_match_counts)
+from models.btts_model      import score_matches
+from models.match_result    import build_match_result_card
+from models.daily_picks     import confidence_band, rank_picks
+
+
+SEASONS = ["2026-27", "2025-26"]
 
 
 # ============================================================
 #  PAGE CONFIG  (must be first Streamlit call)
 # ============================================================
 st.set_page_config(
-    page_title   = "BTTS Slip AI Dashboard",
+    page_title   = "Football Match Outlook",
     page_icon    = "⚽",
     layout       = "wide",
     initial_sidebar_state = "expanded",
@@ -74,12 +80,10 @@ def render_html(html: str) -> None:
     st.markdown(cleaned, unsafe_allow_html=True)
 
 
-
 # ============================================================
 #  CUSTOM CSS — Dark tactical theme
 # ============================================================
-render_html("""
-<style>
+render_html("""<style>
 /* ---------- Root palette ---------- */
 :root {
     --bg-primary:   #0a0e1a;
@@ -197,74 +201,6 @@ render_html("""
     letter-spacing: 0.03em;
 }
 
-/* ---------- Slip cards ---------- */
-.slip-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px 20px;
-    margin-bottom: 12px;
-    transition: all 0.2s;
-    cursor: pointer;
-}
-.slip-card:hover { border-color: var(--accent2); }
-.slip-card.selected {
-    border-color: var(--accent);
-    background: #0d1e30;
-    box-shadow: 0 0 0 1px var(--accent), inset 0 0 20px rgba(0,229,255,0.04);
-}
-.slip-card .slip-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 10px;
-}
-.slip-card .slip-id {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-    letter-spacing: 0.1em;
-}
-.slip-card .slip-score {
-    font-size: 0.75rem;
-    color: var(--accent);
-    font-weight: 700;
-}
-.slip-card .match-leg {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 5px 0;
-    border-bottom: 1px solid #1a2438;
-    font-size: 0.82rem;
-}
-.slip-card .match-leg:last-child { border-bottom: none; }
-.slip-footer {
-    display: flex;
-    gap: 20px;
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid #1a2438;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
-.slip-footer .sf-val { color: var(--text-primary); font-weight: 700; }
-
-/* ---------- Selected slip panel ---------- */
-.selected-panel {
-    background: linear-gradient(135deg, #0d1e2e 0%, #0a1628 100%);
-    border: 1px solid var(--accent);
-    border-radius: 10px;
-    padding: 24px;
-    box-shadow: 0 0 30px rgba(0,229,255,0.08);
-}
-.selected-panel h4 {
-    color: var(--accent);
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.15em;
-    margin-bottom: 16px;
-}
-
 /* ---------- Streamlit overrides ---------- */
 .stButton > button {
     background: linear-gradient(135deg, var(--accent2), #5b21b6) !important;
@@ -305,76 +241,54 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: var(--accent)
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-</style>
-""")
+</style>""")
 
 
 # ============================================================
-#  SESSION STATE INIT
-# ============================================================
-if "selected_slip_id" not in st.session_state:
-    st.session_state.selected_slip_id = None
-if "slips" not in st.session_state:
-    st.session_state.slips = []
-if "slips_generated" not in st.session_state:
-    st.session_state.slips_generated = False
-if "target_slips" not in st.session_state:
-    st.session_state.target_slips = []
-if "target_generated" not in st.session_state:
-    st.session_state.target_generated = False
-if "intl_slip" not in st.session_state:
-    st.session_state.intl_slip = []
-
-
-# ============================================================
-#  SIDEBAR — filter controls
+#  SIDEBAR
 # ============================================================
 with st.sidebar:
     render_html("""
     <div style="text-align:center; padding: 16px 0 24px 0;">
         <div style="font-size:2rem;">⚽</div>
         <div style="font-size:0.7rem; color:#00e5ff; letter-spacing:0.2em;
-                    text-transform:uppercase; font-weight:700;">BTTS Slip AI</div>
+                    text-transform:uppercase; font-weight:700;">Match Outlook</div>
         <div style="font-size:0.6rem; color:#8892a4; margin-top:4px;">
-            Local Betting Dashboard
+            Fixtures · Form · Probabilities
         </div>
     </div>
     """)
 
     st.markdown("---")
 
-    # --- Data source ---
     st.markdown("**📡 Data Source**")
     source = st.radio(
-        "Fixtures",
+        "Source",
         ["Live fixtures", "Sample data", "International (manual)"],
         index=0,
-        help="Live: real fixtures and real team form from the openfootball feed. "
-             "Sample: the synthetic demo card. International: pick any two "
+        help="Live: real fixtures and real form from the openfootball feed. "
+             "Sample: a synthetic demo card. International: price any two "
              "national teams — no fixture list exists for internationals.",
         label_visibility="collapsed",
     )
-    live_mode = source == "Live fixtures"
+    live_mode          = source == "Live fixtures"
     international_mode = source.startswith("International")
 
     market_choice = st.radio(
         "Market",
         ["Match Result (1X2)", "Both Teams To Score"],
         index=0,
-        help="Match result is the market the backtest found signal in "
-             "(AUC 0.672). BTTS scored no better than the league base rate.",
+        help="Match result is the market the backtest found signal in. "
+             "BTTS scored no better than the league base rate.",
         label_visibility="collapsed",
     )
     result_mode = market_choice.startswith("Match Result")
+    prob_label  = "Win Prob" if result_mode else "BTTS Prob"
 
     if result_mode and not live_mode and not international_mode:
         st.caption("⚠️ Match result needs real results to fit on — "
                    "switching the source to live fixtures.")
         live_mode = True
-        source = "Live fixtures"
-    # Live feed has no bookmaker prices, so odds shown are 1 / probability.
-    odds_label = "Fair Odds" if live_mode else "BTTS Odds"
-    prob_label = "Win Prob" if result_mode else "BTTS Prob"
 
     if live_mode:
         live_league_codes = st.multiselect(
@@ -384,98 +298,28 @@ with st.sidebar:
             format_func=lambda code: LIVE_LEAGUES[code],
         )
 
-    st.markdown("---")
-
-    # The filters, slip settings and matchday picker all describe a fixture
-    # CARD. The international pricer has no card — it prices one pairing you
-    # choose — so none of them apply and showing them would imply they do.
     if not international_mode:
-        # --- Filter thresholds ---
-        st.markdown("**🎯 Probability Filter**")
-        min_btts_prob = st.slider(
+        st.markdown(f"**🎯 Show fixtures above**")
+        min_prob = st.slider(
             f"Min {prob_label} (%)",
-            min_value=25, max_value=90,
-            # A 1X2 favourite is often priced under 50%, so a BTTS-shaped floor of
-            # 55% would hide most of the card.
-            value=40 if result_mode else 55, step=1,
-            help=("Only show fixtures whose most likely outcome clears this"
-                  if result_mode else
-                  "Only show matches where BTTS probability ≥ this value"),
+            min_value=0, max_value=90,
+            value=0, step=5,
+            help="A display filter only — the strongest calls above are always "
+                 "drawn from the whole card.",
         ) / 100.0
-
-        st.markdown("**📊 Attack / Defence**")
-        min_avg_scored = st.slider(
-            "Min Avg Goals Scored",
-            min_value=0.5, max_value=2.5, value=1.1, step=0.1
-        )
-        max_avg_conceded = st.slider(
-            "Min Avg Goals Conceded (weakness)",
-            min_value=0.8, max_value=2.5, value=1.3, step=0.1
-        )
-
-        st.markdown(f"**💰 {odds_label} Range**")
-        odds_range = st.slider(
-            f"{odds_label} Range",
-            min_value=1.3, max_value=3.0,
-            value=(1.30, 3.00) if live_mode else (1.55, 2.20), step=0.05,
-            help=("Fair odds are 1 / probability, so this range is just a probability "
-                  "window in disguise — a low ceiling here removes your most likely "
-                  "matches, not your worst ones.") if live_mode
-                 else "Acceptable bookmaker price window",
-        )
-
-        st.markdown("**🎰 Slip Settings**")
-        min_total_odds = st.slider(
-            "Min Total Slip Odds",
-            min_value=2.0, max_value=6.0, value=3.0, step=0.1
-        )
-        include_doubles  = st.checkbox("Include 2-Match Slips",  value=True)
-        include_trebles  = st.checkbox("Include 3-Match Slips",  value=True)
-        max_slips_shown  = st.slider("Max Slips to Show", 5, 30, 15)
-
-        st.markdown("**🎯 Target Odds Slip**")
-        target_odds = st.number_input(
-            "Target Total Odds",
-            min_value=2.0, max_value=200.0, value=25.0, step=1.0,
-            help="Payout multiple the accumulator must reach — e.g. 25.0 for a 25 odds slip"
-        )
-        max_target_legs = st.slider(
-            "Max Legs in Target Slip",
-            min_value=2, max_value=8, value=8,
-            help="BTTS prices around 1.6–1.9 usually need 5–7 legs to reach 25.0"
-        )
-        stake = st.number_input("Stake (units)", min_value=1.0, max_value=1000.0, value=10.0, step=1.0)
-
-        if not live_mode:
-            st.markdown("**📅 Match Day**")
-            today_only = st.checkbox("Today's fixtures only", value=True)
-        else:
-            today_only = False
-
-    else:
-        min_btts_prob, min_avg_scored, max_avg_conceded = 0.55, 1.1, 1.3
-        odds_range, min_total_odds = (1.30, 3.00), 3.0
-        include_doubles = include_trebles = True
-        max_slips_shown, target_odds, max_target_legs, stake = 15, 25.0, 8, 10.0
-        today_only = False
 
     st.markdown("---")
     if st.button("🔄  Refresh Data"):
         st.cache_data.clear()
-        st.session_state.slips = []
-        st.session_state.slips_generated = False
-        st.session_state.target_slips = []
-        st.session_state.target_generated = False
-        st.session_state.selected_slip_id = None
         st.rerun()
 
 
 # ============================================================
-#  DATA PIPELINE
+#  DATA
 # ============================================================
 @st.cache_data(ttl=300)
-def get_scored_matches() -> pd.DataFrame:
-    """Load and score the synthetic demo card (cached for 5 minutes)."""
+def get_sample_card() -> pd.DataFrame:
+    """The synthetic demo card, scored."""
     return score_matches(load_matches())
 
 
@@ -484,42 +328,28 @@ def get_live_season(codes: tuple[str, ...]) -> pd.DataFrame:
     """
     Every fixture and result for the chosen leagues, this season and last.
 
-    Last season is included so team form is not built from three August
-    matches, and it is cached for half an hour — the feed updates daily.
+    Last season is included so form is not built from three August matches,
+    and it is cached for half an hour — the feed updates daily.
     """
-    return load_leagues(["2026-27", "2025-26"], codes=list(codes))
+    return load_leagues(SEASONS, codes=list(codes))
 
 
-def add_fair_odds(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Fill missing prices with fair odds — 1 / probability, no margin.
+@st.cache_data(ttl=86400, show_spinner="Loading international results …")
+def get_international_results(since: str) -> pd.DataFrame:
+    return load_results(since=since)
 
-    The live feed carries no bookmaker odds. Rather than invent prices, the
-    break-even price for the model's own probability is used, and labelled as
-    fair everywhere it appears. A real book prices below this, never above, so
-    any "return" computed from these is an optimistic ceiling and not a payout.
-    """
-    df = df.copy()
-    missing = df["btts_odds"].isna()
-    if missing.any():
-        df.loc[missing, "btts_odds"] = [fair_odds(p) for p in df.loc[missing, "btts_prob"]]
-    return df
+
+@st.cache_resource(show_spinner="Fitting national-team ratings …")
+def get_international_model(since: str):
+    return fit_international_model(load_results(since=since))
 
 
 # ============================================================
 #  INTERNATIONAL — MANUAL PAIRING
 # ============================================================
 # National-team football has no fixture feed reachable from here, so there is
-# no card to build. You name the two teams instead.
+# no card to show. You name the two teams instead.
 if international_mode:
-    @st.cache_data(ttl=86400, show_spinner="Loading international results …")
-    def get_international_results(since: str) -> pd.DataFrame:
-        return load_results(since=since)
-
-    @st.cache_resource(show_spinner="Fitting national-team ratings …")
-    def get_international_model(since: str):
-        return fit_international_model(load_results(since=since))
-
     results = get_international_results(DEFAULT_SINCE)
     teams   = rateable_teams(results)
     counts  = team_match_counts(results)
@@ -529,11 +359,11 @@ if international_mode:
         <span style="font-size:1.6rem; font-weight:800; color:#e8eaf0;
                      letter-spacing:0.05em;">INTERNATIONAL</span>
         <span style="font-size:1.6rem; font-weight:800; color:#00e5ff;
-                     letter-spacing:0.05em;"> MATCH PRICER</span>
+                     letter-spacing:0.05em;"> MATCH OUTLOOK</span>
         <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;
                     text-transform:uppercase; letter-spacing:0.15em;">
-            Manual Pairing · {len(teams)} National Teams · {len(results):,} Results
-            Since {DEFAULT_SINCE[:4]}
+            Manual Pairing · {len(teams)} National Teams ·
+            {len(results):,} Results Since {DEFAULT_SINCE[:4]}
         </div>
     </div>
     """)
@@ -543,14 +373,12 @@ if international_mode:
                 border-radius:6px; padding:12px 16px; margin:12px 0;
                 font-size:0.72rem; color:#8892a4; line-height:1.6;">
         <strong style="color:#f5d020;">Why manual?</strong> No source reachable from here
-        lists upcoming international fixtures — the results archive is history only. So you
-        pick the pairing.
+        lists upcoming international fixtures — the results archive is history only.
         <br>
         <strong style="color:#ff9d00;">Held to a lower standard than the club pages.</strong>
-        The bake-off validated these models on club leagues; nothing here has been backtested
-        on international football. National sides play a handful of matches a year, squads
-        turn over, and friendlies are played with reserves — so treat this as a considered
-        estimate, not a tested one.
+        The models were validated on club leagues; nothing here has been backtested on
+        international football. National sides play a handful of matches a year and
+        friendlies are played with reserves, so treat this as a considered estimate.
     </div>
     """)
 
@@ -567,8 +395,8 @@ if international_mode:
         neutral = st.checkbox("Neutral venue", value=True,
                               help="On neutral ground the home-advantage term is dropped.")
 
-    model  = get_international_model(DEFAULT_SINCE)
-    priced = price_fixture(model, home_team, away_team, neutral=neutral)
+    priced = price_fixture(get_international_model(DEFAULT_SINCE),
+                           home_team, away_team, neutral=neutral)
 
     thin = [t for t in (home_team, away_team) if counts.get(t, 0) < 10]
     if thin:
@@ -591,9 +419,6 @@ if international_mode:
                         letter-spacing:0.08em;">{name}</div>
             <div style="font-size:1.8rem; font-weight:800; color:{colour};
                         line-height:1.2;">{prob*100:.1f}%</div>
-            <div style="font-size:0.7rem; color:#8892a4;">fair odds
-                <strong style="color:#f5d020;">{(1/prob if prob > 0 else float("inf")):.2f}</strong>
-            </div>
         </div>
     """ for name, prob, colour in outcomes)
 
@@ -623,98 +448,6 @@ if international_mode:
     </div>
     """)
 
-    # --- add this pairing to a slip -------------------------------------
-    render_html('<div class="section-header"><h3>Build a Slip</h3></div>')
-
-    pick_col, add_col = st.columns([3, 1])
-    outcome_options = {
-        f"{home_team} win": ("p_home", home_team),
-        "Draw":             ("p_draw", "Draw"),
-        f"{away_team} win": ("p_away", away_team),
-    }
-    with pick_col:
-        chosen = st.selectbox("Selection", list(outcome_options),
-                              index=int(np.argmax([priced["p_home"], priced["p_draw"],
-                                                   priced["p_away"]])))
-    with add_col:
-        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-        if st.button("➕  Add to slip"):
-            key, _team = outcome_options[chosen]
-            st.session_state.intl_slip.append({
-                "fixture":   f"{home_team} v {away_team}",
-                "selection": chosen,
-                "prob":      float(priced[key]),
-                "venue":     "Neutral" if neutral else home_team,
-            })
-            st.rerun()
-
-    slip = st.session_state.intl_slip
-    if not slip:
-        render_html("""
-        <div style="background:#0d1525; border:1px dashed #1e2d45; border-radius:8px;
-                    padding:18px; text-align:center; color:#8892a4; font-size:0.78rem;">
-            No legs yet. Price a pairing above and add it.
-        </div>
-        """)
-    else:
-        # Legs are treated as independent, which is fair here: separate
-        # international fixtures share no pitch, squad or weather. The same
-        # assumption is shakier on a single-day club card.
-        combined = 1.0
-        for leg in slip:
-            combined *= leg["prob"]
-
-        legs_html = "".join(f"""
-            <div style="display:flex; justify-content:space-between; align-items:center;
-                        padding:8px 0; border-bottom:1px solid #1a2438;">
-                <div>
-                    <div style="font-size:0.84rem; font-weight:700; color:#e8eaf0;">
-                        {leg['selection']}</div>
-                    <div style="font-size:0.68rem; color:#8892a4;">
-                        {leg['fixture']} · {leg['venue']}</div>
-                </div>
-                <div style="text-align:right;">
-                    <div style="color:#00ff88; font-weight:700;">{leg['prob']*100:.1f}%</div>
-                    <div style="font-size:0.68rem; color:#f5d020;">fair {1/leg['prob']:.2f}</div>
-                </div>
-            </div>
-        """ for leg in slip)
-
-        render_html(f"""
-        <div class="selected-panel">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                <h4>📋 International Slip</h4>
-                <div style="text-align:right;">
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Fair total odds</div>
-                    <div style="font-size:2rem; font-weight:800; color:#f5d020; line-height:1;">
-                        {1/combined:.2f}</div>
-                </div>
-            </div>
-            {legs_html}
-            <div style="display:flex; gap:32px; margin-top:12px; padding-top:10px;
-                        border-top:1px solid #1e2d45;">
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Combined probability</div>
-                    <div style="font-size:1.3rem; font-weight:700; color:#00ff88;">
-                        {combined*100:.1f}%</div>
-                </div>
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Legs</div>
-                    <div style="font-size:1.3rem; font-weight:700; color:#a78bfa;">{len(slip)}</div>
-                </div>
-            </div>
-        </div>
-        """)
-
-        clear_col, _ = st.columns([1, 3])
-        with clear_col:
-            if st.button("✕  Clear slip"):
-                st.session_state.intl_slip = []
-                st.rerun()
-
     render_html('<div class="section-header"><h3>Recent Form</h3></div>')
     form_left, form_right = st.columns(2)
     for column, team in ((form_left, home_team), (form_right, away_team)):
@@ -730,16 +463,18 @@ if international_mode:
     <div style="margin-top:16px; padding:10px 14px; background:#0a1220;
                 border-radius:4px; border-left:2px solid #7c3aed;">
         <span style="font-size:0.7rem; color:#8892a4;">
-            Fair odds are 1 / probability with no bookmaker margin — a real book pays less.
-            For research only. Gamble responsibly.
+            Probabilities from a statistical model, for interest and context.
+            Not betting advice — see the README for how these models performed
+            against bookmaker prices.
         </span>
     </div>
     """)
     st.stop()
 
 
-# ---- Load data ----------------------------------------------------------
-odds_are_fair = False
+# ============================================================
+#  BUILD THE CARD
+# ============================================================
 live_meta: dict = {}
 
 if live_mode:
@@ -750,15 +485,14 @@ if live_mode:
                  "from here. Switch to Sample data in the sidebar to keep working.")
         st.stop()
 
-    upcoming = available_dates(season_df)
+    upcoming    = available_dates(season_df)
     default_day = next_matchday(season_df)
 
     with st.sidebar:
         st.markdown("**📅 Matchday**")
         if upcoming:
             chosen_day = st.selectbox(
-                "Date",
-                options=upcoming,
+                "Date", options=upcoming,
                 index=upcoming.index(default_day) if default_day in upcoming else 0,
                 format_func=lambda d: d.strftime("%a %d %b %Y"),
                 label_visibility="collapsed",
@@ -783,7 +517,6 @@ if live_mode:
     if result_mode:
         priced, result_meta = build_match_result_card(card_df, season_df)
         priced = priced[priced["selection_prob"].notna()].reset_index(drop=True)
-
         if priced.empty:
             render_html("""
             <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
@@ -793,49 +526,26 @@ if live_mode:
             </div>
             """)
             st.stop()
-
-        # The rest of the app works off btts_prob / btts_odds; in this market
-        # those carry the chosen selection's probability and its fair price.
-        priced["btts_prob"]     = priced["selection_prob"]
-        priced["btts_prob_pct"] = (priced["selection_prob"] * 100).round(1).astype(str) + "%"
-        all_matches_df = add_fair_odds(priced)
+        # One column carries "the probability being shown", whichever market it is.
+        priced["prob"] = priced["selection_prob"]
+        card = priced
     else:
+        card = score_matches(card_df)
+        card["prob"] = card["btts_prob"]
         result_meta = {}
-        all_matches_df = add_fair_odds(score_matches(card_df))
 
-    odds_are_fair  = True
     live_meta = {
-        "day":        chosen_day,
-        "leagues":    len(live_league_codes),
-        "results":    int(season_df["played"].sum()),
-        "unusable":   malformed_score_count(season_df),
-        "fetched":    feed_status(["2026-27", "2025-26"], live_league_codes).get("last_fetched"),
+        "day":      chosen_day,
+        "leagues":  len(live_league_codes),
+        "results":  int(season_df["played"].sum()),
+        "unusable": malformed_score_count(season_df),
+        "fetched":  feed_status(SEASONS, live_league_codes).get("last_fetched"),
+        **result_meta,
     }
-    # Merged last so the market's own fit summary survives.
-    live_meta.update(result_meta)
 else:
-    all_matches_df = get_scored_matches()
-    if today_only:
-        all_matches_df = filter_todays_matches(all_matches_df)
-
-# Apply filters
-slip_sizes = []
-if include_doubles: slip_sizes.append(2)
-if include_trebles: slip_sizes.append(3)
-
-filtered_df = filter_high_probability_matches(
-    df               = all_matches_df,
-    min_btts_prob    = min_btts_prob,
-    # The attack/defence thresholds encode a BTTS idea — both sides likely to
-    # score. They say nothing about who wins, so they are stood down on the
-    # match-result market rather than quietly shrinking the card.
-    min_avg_scored   = 0.0 if result_mode else min_avg_scored,
-    max_avg_conceded = 0.0 if result_mode else max_avg_conceded,
-    min_btts_odds    = odds_range[0],
-    max_btts_odds    = odds_range[1],
-)
-
-summary = get_filter_summary(all_matches_df, filtered_df)
+    card = get_sample_card()
+    card["prob"] = card["btts_prob"]
+    result_meta = {}
 
 
 # ============================================================
@@ -846,100 +556,68 @@ with col_title:
     render_html(f"""
     <div style="padding: 8px 0 4px 0;">
         <span style="font-size:1.6rem; font-weight:800; color:#e8eaf0;
-                     letter-spacing:0.05em;">BTTS SLIP</span>
+                     letter-spacing:0.05em;">MATCH</span>
         <span style="font-size:1.6rem; font-weight:800; color:#00e5ff;
-                     letter-spacing:0.05em;"> AI DASHBOARD</span>
+                     letter-spacing:0.05em;"> OUTLOOK</span>
         <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;
                     text-transform:uppercase; letter-spacing:0.15em;">
-            {"Match Result · 1X2" if result_mode else "Both Teams To Score"} · Local Intelligence ·
-            {"Live Fixtures" if live_mode else "Synthetic Demo Card"}
+            {"Match Result · 1X2" if result_mode else "Both Teams To Score"} ·
+            Fixtures · Form · Probabilities
         </div>
     </div>
     """)
 with col_status:
     if live_mode:
-        chip_bg, chip_border, chip_text = "#0d2518", "#00ff88", "#00ff88"
-        chip_label = (f"● LIVE FEED · {live_meta['day']:%a %d %b} · "
-                      f"{len(all_matches_df)} Fixtures")
+        chip_border, chip_bg = "#00ff88", "#0d2518"
+        chip_label = f"● LIVE FEED · {live_meta['day']:%a %d %b} · {len(card)} Fixtures"
     else:
-        chip_bg, chip_border, chip_text = "#1a1400", "#f5d020", "#f5d020"
-        chip_label = f"◌ SAMPLE DATA · {len(all_matches_df)} Fixtures"
+        chip_border, chip_bg = "#f5d020", "#1a1400"
+        chip_label = f"◌ SAMPLE DATA · {len(card)} Fixtures"
 
     render_html(f"""
     <div style="text-align:right; padding-top:12px;">
-        <span style="background:{chip_bg}; border:1px solid {chip_border}; color:{chip_text};
+        <span style="background:{chip_bg}; border:1px solid {chip_border}; color:{chip_border};
                      padding:4px 10px; border-radius:20px; font-size:0.68rem;
-                     letter-spacing:0.1em; text-transform:uppercase;">
-            {chip_label}
-        </span>
+                     letter-spacing:0.1em; text-transform:uppercase;">{chip_label}</span>
     </div>
     """)
 
-render_html("<div style='margin-bottom:4px;'></div>")
-
-# --- Top KPI row ---
-k1, k2, k3, k4, k5 = st.columns(5)
-kpis = [
-    (k1, str(summary["total_matches"]),     "Total Fixtures"),
-    (k2, str(summary["filtered_matches"]),  "Selections" if result_mode else "BTTS Candidates"),
-    (k3, f"{summary['avg_btts_prob']}%",    f"Avg {prob_label}"),
-    (k4, f"{summary['max_btts_prob']}%",    "Best Match Prob"),
-    (k5, str(len(st.session_state.slips)),  "Slips Generated"),
-]
-for col, val, label in kpis:
-    with col:
-        st.metric(label=label, value=val)
-
 
 # ============================================================
-#  DATA PROVENANCE / HONESTY BANNER
+#  PROVENANCE + WHAT THIS IS
 # ============================================================
 if live_mode:
     fetched = live_meta.get("fetched")
+    fitted  = (f" · Poisson models fitted per league on "
+               f"{live_meta['training_matches']:,} results"
+               if result_mode and "training_matches" in live_meta else "")
     render_html(f"""
     <div style="background:#0d1525; border:1px solid #1e2d45; border-left:2px solid #00e5ff;
                 border-radius:6px; padding:12px 16px; margin:8px 0 4px 0;
                 font-size:0.72rem; color:#8892a4; line-height:1.6;">
         <strong style="color:#00e5ff;">Real fixtures.</strong>
-        {live_meta['leagues']} leagues · team form built from
+        {live_meta['leagues']} leagues · form built from
         <strong style="color:#e8eaf0;">{live_meta['results']:,}</strong> completed matches
         (this season and last){f" · feed fetched {fetched:%d %b %H:%M}" if fetched is not None else ""}
-        {f" · {live_meta['unusable']} matches skipped for unusable scores" if live_meta['unusable'] else ""}
-        {f" · Poisson models fitted per league on {live_meta['training_matches']:,} results "
-          f"({live_meta['leagues_fitted']} leagues)" if result_mode and 'leagues_fitted' in live_meta else ""}.
+        {f" · {live_meta['unusable']} matches skipped for unusable scores" if live_meta['unusable'] else ""}{fitted}.
         <br>
-        <strong style="color:#f5d020;">Odds below are FAIR odds (1 / probability), not
-        bookmaker prices</strong> — this feed carries no market odds. A real book pays less,
-        so any return shown is a ceiling, not a payout.
-        <br>
-        {(
-            "<strong style='color:#00ff88;'>This market has measured signal.</strong> "
-            "Backtested walk-forward over 8,770 Premier League matches, the Poisson model "
-            "scored AUC 0.672 and +6.9% skill against the base rate on match result. "
-            "<strong style='color:#f5d020;'>Skill against the base rate is not an edge against "
-            "a bookmaker</strong> — no prices are available here, so nothing below has been "
-            "shown to beat a market."
-            if result_mode else
-            "<strong style='color:#ff9d00;'>These probabilities have no measured edge.</strong> "
-            "Backtested on 154k historical matches, this heuristic and four statistical models "
-            "all scored worse than simply using the league BTTS base rate. Treat the numbers as "
-            "descriptive, not predictive — see the README bake-off results."
-        )}
+        <strong style="color:#f5d020;">These are descriptive probabilities, not betting
+        advice.</strong> Tested walk-forward against closing bookmaker odds on 17,697
+        matches, this model lost on every outcome — ROI −4.6% on home wins, and that
+        result was statistically significant. It reads matches; it does not beat markets.
     </div>
     """)
 
+
 # ============================================================
-#  TODAY'S BEST — top picks and ready-made slips
+#  SECTION 1: THE MODEL'S STRONGEST CALLS
 # ============================================================
-# "Best" means the model's most confident, NOT the best value: value is a
-# comparison against a price, and no odds source here covers these fixtures.
-label_column = "selection_label" if result_mode else None
-top_picks    = rank_picks(all_matches_df, top_n=5)
-daily_slips  = build_daily_slips(all_matches_df, label_column=label_column)
+top_picks = rank_picks(card, top_n=5, prob_column="prob")
 
 render_html(f"""
-<div class="section-header"><h3>★ {live_meta['day']:%A %d %B} · Best {len(top_picks)} Picks</h3></div>
-""" if live_mode else '<div class="section-header"><h3>★ Best Picks</h3></div>')
+<div class="section-header"><h3>01 · Strongest Calls{
+    f" · {live_meta['day']:%A %d %B}" if live_mode else ""}</h3></div>
+""")
 
 if top_picks.empty:
     render_html("""
@@ -949,17 +627,17 @@ if top_picks.empty:
     </div>
     """)
 else:
-    pick_cards = ""
+    calls = ""
     for rank, pick in enumerate(top_picks.itertuples(index=False), 1):
-        band, colour = confidence_band(pick.btts_prob)
+        band, colour = confidence_band(pick.prob)
         headline = (getattr(pick, "selection_label", None)
-                    if result_mode else f"{pick.home_team} vs {pick.away_team}")
-        pick_cards += f"""
+                    if result_mode else f"Both teams to score")
+        calls += f"""
         <div style="display:flex; align-items:center; gap:14px; padding:10px 14px;
                     background:#111827; border:1px solid #1e2d45;
                     border-left:3px solid {colour}; border-radius:6px; margin-bottom:8px;">
-            <div style="font-size:1.1rem; font-weight:800; color:{colour}; min-width:26px;">
-                {rank}</div>
+            <div style="font-size:1.1rem; font-weight:800; color:{colour};
+                        min-width:26px;">{rank}</div>
             <div style="flex:1;">
                 <div style="font-size:0.9rem; font-weight:700; color:#e8eaf0;">{headline}</div>
                 <div style="font-size:0.68rem; color:#8892a4;">
@@ -968,90 +646,52 @@ else:
             </div>
             <div style="text-align:right;">
                 <div style="font-size:1.2rem; font-weight:800; color:{colour};">
-                    {pick.btts_prob*100:.1f}%</div>
-                <div style="font-size:0.66rem; color:#8892a4;">{band} · fair
-                    <strong style="color:#f5d020;">{pick.fair_odds}</strong></div>
+                    {pick.prob*100:.1f}%</div>
+                <div style="font-size:0.66rem; color:#8892a4;">{band}</div>
             </div>
         </div>
         """
-    render_html(pick_cards)
-
-# --- ready-made slips ---
-render_html('<div class="section-header"><h3>★ Daily Slips</h3></div>')
-
-if not daily_slips:
+    render_html(calls)
     render_html("""
-    <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
-                padding:14px; color:#f5d020; font-size:0.8rem;">
-        Not enough priced fixtures on this card to build a slip.
+    <div style="font-size:0.68rem; color:#8892a4; margin-top:4px;">
+        Ranked by the model's confidence — which says how predictable a match looks,
+        not whether any price on it is worth taking.
+    </div>
+    """)
+
+
+# ============================================================
+#  SECTION 2: EVERY FIXTURE
+# ============================================================
+render_html('<div class="section-header"><h3>02 · All Fixtures</h3></div>')
+
+shown = card[card["prob"] >= min_prob] if min_prob > 0 else card
+
+if shown.empty:
+    render_html(f"""
+    <div style="background:#1a0a0a; border:1px solid #ff444444; border-radius:6px;
+                padding:16px; color:#ff7777; font-size:0.82rem; text-align:center;">
+        No fixture on this card reaches {min_prob*100:.0f}%. Lower the filter in the sidebar.
     </div>
     """)
 else:
-    slip_columns = st.columns(len(daily_slips))
-    for column, slip in zip(slip_columns, daily_slips):
-        with column:
-            legs_html = "".join(f"""
-                <div style="display:flex; justify-content:space-between; gap:8px;
-                            padding:5px 0; border-bottom:1px solid #1a2438;
-                            font-size:0.72rem;">
-                    <span style="color:#e8eaf0;">{selection}</span>
-                    <span style="color:#8892a4; white-space:nowrap;">{prob}%</span>
-                </div>
-            """ for selection, prob in zip(slip["selections"], slip["leg_probs"]))
+    if min_prob > 0:
+        render_html(f"""
+        <div style='font-size:0.75rem; color:#8892a4; margin-bottom:8px;'>
+            Showing <strong style='color:#00e5ff;'>{len(shown)}</strong> of {len(card)}
+            fixtures · {prob_label} ≥ {min_prob*100:.0f}%
+        </div>
+        """)
 
-            render_html(f"""
-            <div style="background:#111827; border:1px solid #1e2d45; border-top:2px solid #7c3aed;
-                        border-radius:6px; padding:14px;">
-                <div style="font-size:0.8rem; font-weight:800; color:#a78bfa;
-                            text-transform:uppercase; letter-spacing:0.08em;">{slip['name']}</div>
-                <div style="font-size:0.66rem; color:#8892a4; margin-bottom:8px;">{slip['note']}</div>
-                {legs_html}
-                <div style="display:flex; justify-content:space-between; margin-top:10px;
-                            font-size:0.7rem; color:#8892a4;">
-                    <span>Combined <strong style="color:#00ff88;">{slip['combined_prob']}%</strong></span>
-                    <span>Fair total <strong style="color:#f5d020;">{slip['total_fair_odds']}</strong></span>
-                </div>
-            </div>
-            """)
-
-    render_html("""
-    <div style="font-size:0.68rem; color:#8892a4; margin-top:10px;">
-        Ranked by model confidence, not by value — value needs a price to compare against,
-        and none is available here. Fair totals carry no bookmaker margin, so a real slip
-        pays less than shown.
-    </div>
-    """)
-
-
-# ============================================================
-#  SECTION 1: ALL MATCHES TABLE
-# ============================================================
-render_html("""
-<div class="section-header"><h3>01 · All Upcoming Fixtures</h3></div>
-""")
-
-def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
-    """Render the match list as a styled HTML table."""
     rows_html = ""
-    for _, row in df.iterrows():
-        prob        = row["btts_prob"]
-        label, color = get_confidence_label(prob)
-        prob_pct    = f"{prob*100:.1f}%"
-        
-        # Row background for high-prob matches
-        row_style = "background: #0d1a2e;" if prob >= highlight_threshold else ""
-
-        # On the match-result market each row also names the outcome backed.
-        # The header adds this column too — both must agree or every cell
-        # after it shifts one place left.
+    for _, row in shown.sort_values("prob", ascending=False).iterrows():
+        band, colour = confidence_band(row["prob"])
         selection_cell = ""
         if result_mode:
-            pick = row.get("selection_label") or "—"
             selection_cell = (f'<td style="color:#00e5ff; font-size:0.78rem; '
-                              f'font-weight:700;">{pick}</td>')
-        
+                              f'font-weight:700;">{row.get("selection_label") or "—"}</td>')
         rows_html += f"""
-        <tr style="{row_style}">
+        <tr>
             <td style="color:#8892a4; font-size:0.7rem;">{row['kickoff']}</td>
             <td><strong>{row['home_team']}</strong>
                 <span style="color:#8892a4; font-size:0.72rem;"> vs </span>
@@ -1059,11 +699,10 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
             <td style="color:#8892a4;">{row['league']}</td>
             {selection_cell}
             <td>
-                <span class="prob-badge" style="background:{color}22; color:{color};
-                      border:1px solid {color}44;">{prob_pct}</span>
+                <span class="prob-badge" style="background:{colour}22; color:{colour};
+                      border:1px solid {colour}44;">{row['prob']*100:.1f}%</span>
             </td>
-            <td style="font-size:0.75rem; color:#8892a4;">{label}</td>
-            <td style="color:#f5d020; font-weight:700;">{row['btts_odds']}</td>
+            <td style="font-size:0.75rem; color:#8892a4;">{band}</td>
             <td style="color:#8892a4; font-size:0.75rem;">
                 {row['home_avg_scored']} / {row['away_avg_scored']}
             </td>
@@ -1073,432 +712,23 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
         </tr>
         """
 
-    table_html = f"""
+    render_html(f"""
     <table class="match-table">
         <thead>
             <tr>
                 <th>Kickoff</th>
                 <th>Match</th>
                 <th>League</th>
-                {'<th>Selection</th>' if result_mode else ''}
+                {'<th>Most likely</th>' if result_mode else ''}
                 <th>{prob_label}</th>
-                <th>Signal</th>
-                <th>{odds_label}</th>
+                <th>Confidence</th>
                 <th>Avg Scored H/A</th>
                 <th>Avg Conceded H/A</th>
             </tr>
         </thead>
         <tbody>{rows_html}</tbody>
     </table>
-    """
-    render_html(table_html)
-
-
-with st.expander("View All Matches", expanded=False):
-    render_matches_table(all_matches_df)
-
-
-# ============================================================
-#  SECTION 2: FILTERED HIGH-PROBABILITY MATCHES
-# ============================================================
-render_html(f"""
-<div class="section-header"><h3>02 · {"High Probability Selections" if result_mode else "High Probability BTTS Candidates"}</h3></div>
-""")
-
-if filtered_df.empty:
-    render_html("""
-    <div style="background:#1a0a0a; border:1px solid #ff444444; border-radius:6px;
-                padding:16px; color:#ff7777; font-size:0.82rem; text-align:center;">
-        ⚠️ No matches pass your current filters. Try lowering the BTTS threshold in the sidebar.
-    </div>
     """)
-else:
-    render_html(
-        f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:8px;'>"
-        f"Showing <strong style='color:#00e5ff;'>{len(filtered_df)}</strong> of "
-        f"{len(all_matches_df)} fixtures · Filter: {prob_label} ≥ {min_btts_prob*100:.0f}%"
-        f"</div>")
-    render_matches_table(filtered_df, highlight_threshold=0.0)
-
-
-# ============================================================
-#  SECTION 3: SLIP GENERATOR
-# ============================================================
-render_html("""
-<div class="section-header"><h3>03 · Slip Generator</h3></div>
-""")
-
-gen_col, info_col = st.columns([1, 3])
-
-with gen_col:
-    generate_clicked = st.button("⚡  Generate Slips")
-
-with info_col:
-    render_html(
-        f"<div style='font-size:0.75rem; color:#8892a4; padding-top:8px;'>"
-        f"Generates {'2-match + ' if include_doubles else ''}"
-        f"{'3-match ' if include_trebles else ''}combinations · "
-        f"Min total odds: <strong style='color:#f5d020;'>{min_total_odds:.1f}</strong> · "
-        f"Ranked by: prob × odds"
-        f"</div>")
-
-# Generate slips on button click
-if generate_clicked:
-    if filtered_df.empty:
-        st.warning("No filtered matches to build slips from. Adjust your filters first.")
-    elif not slip_sizes:
-        st.warning("Enable at least one slip size (doubles or trebles) in the sidebar.")
-    else:
-        st.session_state.slips = generate_slips(
-            filtered_df    = filtered_df,
-            min_total_odds = min_total_odds,
-            max_slips      = max_slips_shown,
-            slip_sizes     = tuple(slip_sizes),
-        )
-        st.session_state.slips_generated = True
-        st.session_state.selected_slip_id = None
-
-# Display slips
-if st.session_state.slips_generated:
-    slips = st.session_state.slips
-
-    if not slips:
-        render_html("""
-        <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
-                    padding:16px; color:#f5d020; font-size:0.82rem; text-align:center;">
-            ⚠️ No slips meet the minimum total odds threshold.
-            Try lowering the "Min Total Slip Odds" slider or enabling more matches.
-        </div>
-        """)
-    else:
-        render_html(
-            f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:12px;'>"
-            f"Found <strong style='color:#00ff88;'>{len(slips)}</strong> qualifying slips"
-            f"</div>")
-
-        # Render each slip as a card with a select button
-        for slip in slips:
-            is_selected = (st.session_state.selected_slip_id == slip["slip_id"])
-            selected_class = "selected" if is_selected else ""
-
-            # Build match legs HTML
-            legs_html = ""
-            for match, prob, odds in zip(
-                slip["matches"], slip["btts_probs"], slip["btts_odds"]
-            ):
-                _, col = get_confidence_label(prob / 100)
-                legs_html += f"""
-                <div class="match-leg">
-                    <span>{match}</span>
-                    <span style="display:flex; gap:12px; align-items:center;">
-                        <span class="prob-badge"
-                              style="background:{col}22; color:{col};
-                                     border:1px solid {col}44; font-size:0.73rem;">
-                            {prob}%
-                        </span>
-                        <span style="color:#f5d020; font-weight:700;
-                                     font-size:0.8rem;">{odds}</span>
-                    </span>
-                </div>
-                """
-
-            # Odds colour: green if ≥ 4, yellow if ≥ 3
-            odds_color = "#00ff88" if slip["total_odds"] >= 4.0 else "#f5d020"
-
-            selected_badge = (
-                '<span style="background:#00e5ff22; border:1px solid #00e5ff; '
-                'color:#00e5ff; padding:2px 8px; border-radius:20px; '
-                'font-size:0.65rem; letter-spacing:0.1em;">✓ SELECTED</span>'
-                if is_selected else ""
-            )
-
-            card_html = f"""
-            <div class="slip-card {selected_class}">
-                <div class="slip-header">
-                    <div>
-                        <span class="slip-id">{slip['slip_id']}</span>
-                        &nbsp;&nbsp;
-                        <span style="background:#1a1030; border:1px solid #7c3aed44;
-                              color:#a78bfa; padding:2px 8px; border-radius:20px;
-                              font-size:0.65rem;">{slip['legs']}-Leg Acca</span>
-                        &nbsp;{selected_badge}
-                    </div>
-                    <span class="slip-score">Score: {slip['slip_score']:.3f}</span>
-                </div>
-                {legs_html}
-                <div class="slip-footer">
-                    <div>Combined Prob <span class="sf-val">{slip['combined_prob']}%</span></div>
-                    <div>{"Fair Total" if live_mode else "Total Odds"} <span class="sf-val" style="color:{odds_color};">
-                        {slip['total_odds']}</span></div>
-                    <div>Matches <span class="sf-val">{slip['legs']}</span></div>
-                </div>
-            </div>
-            """
-            render_html(card_html)
-
-            # Select button per slip
-            btn_label = "✓ Selected" if is_selected else f"Select  {slip['slip_id']}"
-            if st.button(btn_label, key=f"btn_{slip['slip_id']}"):
-                st.session_state.selected_slip_id = slip["slip_id"]
-                st.rerun()
-
-
-# ============================================================
-#  SECTION 3B: TARGET ODDS SLIP
-# ============================================================
-render_html("""
-<div class="section-header"><h3>03B · Target Odds Slip</h3></div>
-""")
-
-tgt_col, tgt_info_col = st.columns([1, 3])
-
-with tgt_col:
-    target_clicked = st.button(f"🎯  Build {target_odds:.2f} Odds Slip")
-
-with tgt_info_col:
-    render_html(
-        f"<div style='font-size:0.75rem; color:#8892a4; padding-top:8px;'>"
-        f"Searches 2–{max_target_legs} leg combinations for the "
-        f"<strong style='color:#f5d020;'>highest-probability</strong> acca that reaches "
-        f"<strong style='color:#f5d020;'>{target_odds:.2f}</strong> · "
-        f"no club used twice"
-        f"</div>")
-
-if target_clicked:
-    if filtered_df.empty:
-        st.warning("No filtered matches to build a target slip from. Adjust your filters first.")
-    else:
-        st.session_state.target_slips = build_target_odds_slips(
-            filtered_df = filtered_df,
-            target_odds = target_odds,
-            min_legs    = 2,
-            max_legs    = max_target_legs,
-            max_slips   = 5,
-        )
-        st.session_state.target_generated = True
-        st.session_state.selected_slip_id = None
-
-if st.session_state.target_generated:
-    target_slips = st.session_state.target_slips
-
-    if not target_slips:
-        best_possible = 1.0
-        for o in sorted(filtered_df["btts_odds"], reverse=True)[:max_target_legs]:
-            best_possible *= o
-        render_html(f"""
-        <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
-                    padding:16px; color:#f5d020; font-size:0.82rem;">
-            ⚠️ No combination of today's filtered matches reaches {target_odds:.2f}.
-            The best {max_target_legs}-leg acca available is
-            <strong>{best_possible:.2f}</strong>.<br>
-            <span style="font-size:0.75rem;">
-                Widen the BTTS odds range, lower the probability filter, or raise the max leg
-                count in the sidebar to open up more candidates.
-            </span>
-        </div>
-        """)
-    else:
-        render_html(
-            f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:12px;'>"
-            f"Best <strong style='color:#00ff88;'>{len(target_slips)}</strong> slips for a "
-            f"<strong style='color:#f5d020;'>{target_odds:.2f}</strong> target"
-            f"</div>")
-
-        for slip in target_slips:
-            is_selected    = (st.session_state.selected_slip_id == slip["slip_id"])
-            selected_class = "selected" if is_selected else ""
-
-            legs_html = ""
-            for match, prob, odds, kickoff in zip(
-                slip["matches"], slip["btts_probs"], slip["btts_odds"], slip["kickoffs"]
-            ):
-                _, col = get_confidence_label(prob / 100)
-                legs_html += f"""
-                <div class="match-leg">
-                    <span>{match}
-                        <span style="color:#8892a4; font-size:0.68rem;">
-                            &nbsp;{kickoff[11:]}
-                        </span>
-                    </span>
-                    <span style="display:flex; gap:12px; align-items:center;">
-                        <span class="prob-badge"
-                              style="background:{col}22; color:{col};
-                                     border:1px solid {col}44; font-size:0.73rem;">
-                            {prob}%
-                        </span>
-                        <span style="color:#f5d020; font-weight:700;
-                                     font-size:0.8rem;">{odds}</span>
-                    </span>
-                </div>
-                """
-
-            reach_color = "#00ff88" if slip["clears_target"] else "#f5d020"
-            reach_label = (
-                f"✓ Clears target (+{slip['odds_gap']:.2f})" if slip["clears_target"]
-                else f"Under target ({slip['odds_gap']:.2f})"
-            )
-
-            render_html(f"""
-            <div class="slip-card {selected_class}">
-                <div class="slip-header">
-                    <div>
-                        <span class="slip-id">{slip['slip_id']}</span>
-                        &nbsp;&nbsp;
-                        <span style="background:#1a1030; border:1px solid #7c3aed44;
-                              color:#a78bfa; padding:2px 8px; border-radius:20px;
-                              font-size:0.65rem;">{slip['legs']}-Leg Acca</span>
-                        &nbsp;
-                        <span style="background:{reach_color}22; border:1px solid {reach_color}44;
-                              color:{reach_color}; padding:2px 8px; border-radius:20px;
-                              font-size:0.65rem;">{reach_label}</span>
-                    </div>
-                    <span class="slip-score">Score: {slip['slip_score']:.3f}</span>
-                </div>
-                {legs_html}
-                <div class="slip-footer">
-                    <div>Combined Prob <span class="sf-val">{slip['combined_prob']}%</span></div>
-                    <div>{"Fair Total" if live_mode else "Total Odds"} <span class="sf-val" style="color:{reach_color};">
-                        {slip['total_odds']}</span></div>
-                    <div>Returns {stake:.0f}u →
-                        <span class="sf-val">{potential_return(slip['total_odds'], stake):.2f}u</span>
-                    </div>
-                </div>
-            </div>
-            """)
-
-            btn_label = "✓ Selected" if is_selected else f"Select  {slip['slip_id']}"
-            if st.button(btn_label, key=f"btn_{slip['slip_id']}"):
-                st.session_state.selected_slip_id = slip["slip_id"]
-                st.rerun()
-
-        render_html(
-            "<div style='font-size:0.7rem; color:#8892a4; margin-top:4px;'>"
-            "A slip this long is a low-probability bet by design — the combined probability "
-            "above is the model's honest estimate of it landing."
-            "</div>")
-
-
-# ============================================================
-#  SECTION 4: SELECTED SLIP PANEL
-# ============================================================
-render_html("""
-<div class="section-header"><h3>04 · Selected Slip</h3></div>
-""")
-
-if st.session_state.selected_slip_id is None:
-    render_html("""
-    <div style="background:#0d1525; border:1px dashed #1e2d45; border-radius:8px;
-                padding:24px; text-align:center; color:#8892a4; font-size:0.82rem;">
-        No slip selected yet.<br>
-        <span style="font-size:0.7rem;">Generate slips above and click "Select" on your preferred combination.</span>
-    </div>
-    """)
-else:
-    # Find the selected slip object
-    selected = next(
-        (s for s in (st.session_state.slips + st.session_state.target_slips)
-         if s["slip_id"] == st.session_state.selected_slip_id),
-        None
-    )
-
-    if selected:
-        odds_color = "#00ff88" if selected["total_odds"] >= 4.0 else "#f5d020"
-
-        legs_detail = ""
-        for i, (match, prob, odds, kickoff) in enumerate(zip(
-            selected["matches"],
-            selected["btts_probs"],
-            selected["btts_odds"],
-            selected["kickoffs"],
-        ), 1):
-            _, col = get_confidence_label(prob / 100)
-            legs_detail += f"""
-            <div style="display:flex; justify-content:space-between; align-items:center;
-                        padding:10px 0; border-bottom:1px solid #1a2438;">
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase; letter-spacing:0.08em;">
-                        Leg {i} · {kickoff}
-                    </div>
-                    <div style="font-size:0.88rem; font-weight:700;
-                                color:#e8eaf0; margin-top:2px;">{match}</div>
-                    <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;">
-                        Market: {"Match Result" if result_mode else "Both Teams To Score"}
-                    </div>
-                </div>
-                <div style="text-align:right;">
-                    <div class="prob-badge"
-                         style="background:{col}22; color:{col};
-                                border:1px solid {col}44;">{prob}%</div>
-                    <div style="color:#f5d020; font-size:1.1rem; font-weight:800;
-                                margin-top:4px;">{odds}</div>
-                </div>
-            </div>
-            """
-
-        panel_html = f"""
-        <div class="selected-panel">
-            <div style="display:flex; justify-content:space-between;
-                        align-items:flex-start; margin-bottom:16px;">
-                <div>
-                    <h4>📋 Your Selected Slip</h4>
-                    <div style="font-size:0.7rem; color:#8892a4;">{selected['slip_id']} ·
-                        {selected['legs']}-Leg BTTS Accumulator</div>
-                </div>
-                <div style="text-align:right;">
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">{"Fair Total Odds" if live_mode else "Total Odds"}</div>
-                    <div style="font-size:2rem; font-weight:800;
-                                color:{odds_color}; line-height:1;">{selected['total_odds']}</div>
-                </div>
-            </div>
-
-            {legs_detail}
-
-            <div style="display:flex; gap:32px; margin-top:16px; padding-top:12px;
-                        border-top:1px solid #1e2d45;">
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Combined BTTS Prob</div>
-                    <div style="font-size:1.3rem; font-weight:700;
-                                color:#00ff88;">{selected['combined_prob']}%</div>
-                </div>
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Slip Score</div>
-                    <div style="font-size:1.3rem; font-weight:700;
-                                color:#00e5ff;">{selected['slip_score']:.3f}</div>
-                </div>
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Legs</div>
-                    <div style="font-size:1.3rem; font-weight:700;
-                                color:#a78bfa;">{selected['legs']}</div>
-                </div>
-                <div>
-                    <div style="font-size:0.65rem; color:#8892a4;
-                                text-transform:uppercase;">Returns on {stake:.0f}u</div>
-                    <div style="font-size:1.3rem; font-weight:700;
-                                color:#f5d020;">{potential_return(selected['total_odds'], stake):.2f}u</div>
-                </div>
-            </div>
-
-            <div style="margin-top:16px; padding:10px 14px; background:#0a1220;
-                        border-radius:4px; border-left:2px solid #7c3aed;">
-                <span style="font-size:0.7rem; color:#8892a4;">
-                    ⚠️ For research purposes only. Gamble responsibly.
-                    This is a probability model, not a guarantee.
-                </span>
-            </div>
-        </div>
-        """
-        render_html(panel_html)
-
-        # Clear button
-        render_html("<div style='margin-top:12px;'></div>")
-        if st.button("✕  Clear Selection"):
-            st.session_state.selected_slip_id = None
-            st.rerun()
 
 
 # ============================================================
@@ -1508,7 +738,6 @@ render_html("""
 <div style="margin-top:48px; padding-top:16px; border-top:1px solid #1e2d45;
             text-align:center; font-size:0.65rem; color:#4a5568;
             text-transform:uppercase; letter-spacing:0.12em;">
-    BTTS Slip AI Dashboard · Local Mode · Heuristic Model v1.0 ·
-    Upgrade path: XGBoost + API-Football
+    Match Outlook · Information only · Model loses to closing odds — see README
 </div>
 """)

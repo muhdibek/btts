@@ -306,40 +306,6 @@ def test_confidence_bands_are_ordered():
     assert confidence_band(np.nan)[0] == "—"
 
 
-def test_daily_slips_come_in_three_shapes():
-    from models.daily_picks import build_daily_slips
-    slips = build_daily_slips(_card([0.8, 0.75, 0.7, 0.65, 0.6, 0.55]),
-                              label_column="selection_label")
-    assert [s["legs"] for s in slips] == [2, 3, 5]
-    assert [s["name"] for s in slips] == ["Banker double", "Balanced treble", "Long shot"]
-
-
-def test_slip_probability_is_the_product_of_its_legs():
-    from models.daily_picks import build_daily_slips
-    slips = build_daily_slips(_card([0.8, 0.5]), label_column="selection_label")
-    double = slips[0]
-    assert double["combined_prob"] == pytest.approx(40.0)
-    assert double["total_fair_odds"] == pytest.approx(2.5)
-
-
-def test_more_legs_means_lower_probability():
-    from models.daily_picks import build_daily_slips
-    slips = build_daily_slips(_card([0.8, 0.75, 0.7, 0.65, 0.6, 0.55]),
-                              label_column="selection_label")
-    probabilities = [s["combined_prob"] for s in slips]
-    assert probabilities == sorted(probabilities, reverse=True)
-
-
-def test_a_card_too_small_for_a_slip_returns_nothing():
-    from models.daily_picks import build_daily_slips
-    assert build_daily_slips(_card([0.8])) == []
-    assert build_daily_slips(pd.DataFrame()) == []
-
-
-# ---------------------------------------------------------------------------
-# Market comparison
-# ---------------------------------------------------------------------------
-
 def test_roi_standard_error_flags_a_noisy_return():
     """
     A handful of long-priced winners can produce a fat ROI from nothing. The
