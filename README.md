@@ -17,6 +17,7 @@ btts_dashboard/
 │   ├── sample_data.py            ← Synthetic demo card (fallback source)
 │   ├── live_fixtures.py          ← Live fixtures + real team form (openfootball)
 │   ├── international.py          ← National-team results, ratings and pricing
+│   ├── market_data.py            ← Historical matches WITH bookmaker odds
 │   ├── football_data.py          ← football-data.co.uk ingestion + cache
 │   ├── features.py               ← Pre-match feature engineering (leak-free)
 │   └── build_dataset.py          ← CLI: build the labelled training set
@@ -28,6 +29,7 @@ btts_dashboard/
 │   ├── goal_models.py            ← Poisson / Dixon-Coles / negative binomial / Skellam
 │   ├── evaluate.py               ← Log loss, Brier, calibration, ROI
 │   ├── daily_picks.py            ← Day's best selections + ready-made slips
+│   ├── market_test.py            ← Model vs closing odds: the edge test
 │   ├── synthetic.py              ← Match generators with a known process
 │   └── bakeoff.py                ← CLI: score the models head to head
 │
@@ -308,6 +310,55 @@ scoreline grid.
 **Held to a lower standard than the club pages, and the UI says so.** The bake-off
 validated these models on club leagues. Nothing here has been backtested on
 international football.
+
+---
+
+## Does the Model Beat the Market?
+
+No. This is the test that settles it.
+
+Everything else in this repo is scored against the **base rate**, which knows
+nothing about which teams are playing. A **closing price** knows everything the
+books and the betting public know, and on this data it is almost perfectly
+calibrated — implied 44.6% home wins against 44.7% actual.
+
+```bash
+python -m models.market_test --since 2012-01-01
+```
+
+Walk-forward across six leagues, 2012 → September 2026, **17,697 out-of-sample
+matches**, betting at the best price available:
+
+| Outcome | Model log loss | Market log loss | Model AUC | Market AUC | Bets | ROI | t |
+|---|---|---|---|---|---|---|---|
+| Home | 0.6265 | **0.5989** | 0.694 | **0.731** | 9,775 | **−4.6%** | −2.91 |
+| Draw | 0.5587 | **0.5533** | 0.565 | **0.585** | 5,614 | −0.3% | −0.12 |
+| Away | 0.5657 | **0.5411** | 0.701 | **0.739** | 8,887 | −2.9% | −1.24 |
+
+**The model loses on all three, and the home-win loss is statistically
+significant** (t = −2.91, so not chance). Betting its "value" picks would have
+lost money steadily.
+
+`roi_t` is the ROI in standard errors from break-even, and it is there because
+betting returns are treacherously noisy. On the Premier League alone the model
+showed a **+4.1% ROI on draws** — the kind of number that starts a betting
+system. Its t was 0.71. It was nothing.
+
+So the ladder is: the model beats the base rate on match result (+6.9% skill),
+loses to the closing price, and has nothing at all on BTTS. Beating an uninformed
+opponent is not an edge.
+
+### Data
+
+[xgabora/Club-Football-Match-Data-2000-2025](https://github.com/xgabora/Club-Football-Match-Data-2000-2025)
+— ~239,000 matches from 27 countries with closing 1X2 and over/under 2.5 prices
+(average *and* best price), updated within weeks. The 69 MB file is cached
+locally and gitignored.
+
+**Odds for matches not yet played remain unavailable.** Every odds API host is
+blocked by this environment's network policy, and no reachable free dataset
+publishes forward prices — so the live dashboard still shows fair odds only, and
+cannot tell you whether a selection is good value.
 
 ---
 

@@ -178,14 +178,27 @@ def betting_roi(probs, odds, outcomes, edge: float = 0.0,
     if not place.any():
         return {"bets": 0, "staked": 0.0, "profit": 0.0, "roi": np.nan}
 
-    won    = y[place] > 0
-    profit = float(np.sum(np.where(won, (o[place] - 1.0) * stake, -stake)))
-    staked = float(place.sum() * stake)
+    won         = y[place] > 0
+    per_bet     = np.where(won, (o[place] - 1.0) * stake, -stake)
+    profit      = float(per_bet.sum())
+    staked      = float(place.sum() * stake)
+    bets        = int(place.sum())
+
+    # A betting return is extremely noisy: a handful of long-priced winners
+    # moves it several points. The standard error of the mean return per unit
+    # staked says how much of an observed ROI could be chance alone, and the
+    # t-statistic is how many standard errors it sits from break-even. Below
+    # about 2, an ROI is not evidence of anything.
+    spread   = float(per_bet.std(ddof=1)) if bets > 1 else np.nan
+    roi_se   = spread / np.sqrt(bets) / stake if bets > 1 else np.nan
+    roi      = profit / staked
     return {
-        "bets":   int(place.sum()),
+        "bets":   bets,
         "staked": staked,
         "profit": profit,
-        "roi":    profit / staked,
+        "roi":    roi,
+        "roi_se": roi_se,
+        "roi_t":  (roi / roi_se) if roi_se and np.isfinite(roi_se) and roi_se > 0 else np.nan,
     }
 
 

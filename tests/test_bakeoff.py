@@ -334,3 +334,60 @@ def test_a_card_too_small_for_a_slip_returns_nothing():
     from models.daily_picks import build_daily_slips
     assert build_daily_slips(_card([0.8])) == []
     assert build_daily_slips(pd.DataFrame()) == []
+
+
+# ---------------------------------------------------------------------------
+# Market comparison
+# ---------------------------------------------------------------------------
+
+def test_roi_standard_error_flags_a_noisy_return():
+    """
+    A handful of long-priced winners can produce a fat ROI from nothing. The
+    t-statistic is what separates a real return from a lucky one.
+    """
+    from models.evaluate import betting_roi
+    rng = np.random.default_rng(4)
+
+    # Fair coin at fair odds: expected ROI zero, however it lands.
+    outcomes = rng.binomial(1, 0.5, 400)
+    result = betting_roi(np.full(400, 0.6), np.full(400, 2.0), outcomes)
+    assert result["bets"] == 400
+    assert abs(result["roi_t"]) < 2.5          # not distinguishable from chance
+
+    # A genuine, large edge over many bets should clear the bar.
+    outcomes = rng.binomial(1, 0.7, 2000)
+    strong = betting_roi(np.full(2000, 0.7), np.full(2000, 2.0), outcomes)
+    assert strong["roi"] > 0.2
+    assert strong["roi_t"] > 5
+
+
+def test_roi_significance_is_absent_for_a_single_bet():
+    from models.evaluate import betting_roi
+    result = betting_roi(np.array([0.9]), np.array([2.0]), np.array([1]))
+    assert result["bets"] == 1
+    assert np.isnan(result["roi_se"])
+
+
+def test_market_probabilities_strip_the_overround():
+    from data.market_data import market_probabilities
+    matches = pd.DataFrame({
+        "odds_home": [2.0], "odds_draw": [4.0], "odds_away": [4.0],
+        "max_home":  [2.1], "max_draw":  [4.2], "max_away":  [4.2],
+    })
+    average = market_probabilities(matches)
+    assert average[["mkt_p_home", "mkt_p_draw", "mkt_p_away"]].sum(axis=1).iloc[0] == pytest.approx(1.0)
+    assert average["overround"].iloc[0] == pytest.approx(0.0, abs=1e-9)
+
+    # The best price across books carries a smaller margin than the average.
+    best = market_probabilities(matches, best_price=True)
+    assert best["overround"].iloc[0] < 0.0 or best["overround"].iloc[0] <= average["overround"].iloc[0]
+
+
+def test_market_probabilities_handle_missing_prices():
+    from data.market_data import market_probabilities
+    matches = pd.DataFrame({
+        "odds_home": [np.nan], "odds_draw": [4.0], "odds_away": [4.0],
+        "max_home": [np.nan], "max_draw": [4.0], "max_away": [4.0],
+    })
+    probabilities = market_probabilities(matches)
+    assert probabilities["mkt_p_home"].isna().all()
