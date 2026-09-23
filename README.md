@@ -14,7 +14,10 @@ btts_dashboard/
 │
 ├── data/
 │   ├── __init__.py
-│   └── sample_data.py            ← Match data loader (Phase 1: mock, Phase 2: API)
+│   ├── sample_data.py            ← Dashboard fixtures (Phase 1: mock, Phase 2: API)
+│   ├── football_data.py          ← football-data.co.uk ingestion + cache
+│   ├── features.py               ← Pre-match feature engineering (leak-free)
+│   └── build_dataset.py          ← CLI: build the labelled training set
 │
 ├── models/
 │   ├── __init__.py
@@ -25,6 +28,9 @@ btts_dashboard/
 │   ├── filters.py                ← Match filtering logic
 │   ├── slip_generator.py         ← Accumulator slip builder
 │   └── api_client.py             ← API-Football integration (Phase 2)
+│
+├── tests/
+│   └── test_dataset.py           ← Pipeline tests (leakage, Elo, parsing)
 │
 ├── requirements.txt
 └── README.md
@@ -140,7 +146,56 @@ P(BTTS) = 0.40 × P_poisson + 0.45 × P_historical + 0.15 × P_composite
 
 ## Upgrade Path
 
-### Phase 2A — Real API Data
+### Phase 2A — Training Data Pipeline ✅ built
+
+The dashboard's heuristic model has never been fit to a real outcome. Before any
+of that can change, there has to be a labelled history — that pipeline now exists.
+
+```bash
+# ten seasons of the big five leagues + Eredivisie
+python -m data.build_dataset \
+    --leagues E0 SP1 D1 I1 F1 N1 \
+    --start-season 2015 --end-season 2024 \
+    --out data/processed/btts_dataset.csv
+
+python -m data.build_dataset --list-leagues    # division codes
+python -m data.build_dataset --from-cache      # rebuild offline, no downloads
+```
+
+**Source:** [football-data.co.uk](https://www.football-data.co.uk) — free CSVs, no API
+key, full-time scores (so the BTTS label is exact: `FTHG > 0 & FTAG > 0`) and closing
+bookmaker odds in the same row. Season files are cached under `data/raw/`, so a re-run
+costs nothing.
+
+**Features** (46, all computed from matches that kicked off *strictly earlier*):
+
+| Group | Columns |
+|---|---|
+| Form | last-5 / last-10 goals for & against, BTTS rate, failed-to-score rate, clean-sheet rate |
+| Venue splits | home side's recent *home* matches, away side's recent *away* matches |
+| Elo | pre-match ratings with a goal-difference multiplier, home advantage, and regression toward the mean between seasons |
+| Head to head | previous meetings' BTTS rate and average total goals |
+| Rest | days since each side's last match |
+| Market | overround-free implied probabilities from closing 1X2 and over/under 2.5 prices |
+
+**Leakage discipline.** `data/features.py` makes one chronological pass and reads each
+team's history *before* appending the current match to it. `tests/test_dataset.py`
+asserts that invariant directly — a leaked feature backtests beautifully and loses
+money, and it never shows up in the accuracy numbers.
+
+```bash
+python -m pytest tests/ -q
+```
+
+Two rules for whatever trains on this:
+
+1. **Split by date, never randomly.** The rows are chronological; shuffling puts future
+   matches in the training set and inflates every metric.
+2. **Beat the market column, not the base rate.** `mkt_p_over25` already encodes most of
+   what the model is trying to learn. A model that beats a coin flip but not the closing
+   price has no edge.
+
+### Phase 2A′ — Live Fixtures (API-Football)
 
 1. Sign up at [api-football.com](https://www.api-football.com) (free tier: 100 req/day)
 2. Create `.env` file:
@@ -156,13 +211,24 @@ P(BTTS) = 0.40 × P_poisson + 0.45 × P_historical + 0.15 × P_composite
 ### Phase 2B — XGBoost Model
 
 1. Collect labelled match data (features + BTTS outcome 0/1)
-2. Train:
+2. Train on `data/processed/btts_dataset.csv`, split by date:
    ```python
    import xgboost as xgb
    model = xgb.XGBClassifier(n_estimators=300, max_depth=5, learning_rate=0.05)
    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=30)
    import joblib; joblib.dump(model, "models/btts_xgb_model.pkl")
    ```
+3. **Calibrate** on a held-out slice — raw boosted-tree probabilities are overconfident,
+   and this app multiplies them across legs, so the error compounds:
+   ```python
+   from sklearn.calibration import CalibratedClassifierCV
+   calibrated = CalibratedClassifierCV(model, method="isotonic", cv="prefit")
+   calibrated.fit(X_calib, y_calib)
+   ```
+   Five points of overconfidence per leg (0.65 where the truth is 0.60) makes a 6-leg
+   acca read 7.5% when it is really 4.7% — **1.6× overstated**. Note that calibration
+   fixes the per-leg bias but not leg *correlation*: `_calculate_combined_probability()`
+   takes a straight product, which still overstates a same-day multi.
 3. In `models/btts_model.py`, replace `predict_btts_probability()` body:
    ```python
    model = joblib.load("models/btts_xgb_model.pkl")

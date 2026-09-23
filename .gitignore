@@ -3,3 +3,7 @@ __pycache__/
 .env
 .cache/
 venv/
+
+# Downloaded + derived data (rebuild with `python -m data.build_dataset`)
+data/raw/
+data/processed/

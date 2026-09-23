@@ -20,6 +20,9 @@ xgboost>=2.0.0
 # --- API integration (Phase 2) ---
 requests>=2.31.0
 
+# --- Dev / tests ---
+pytest>=7.4.0       # test suite for the dataset pipeline (tests/)
+
 # --- Utilities ---
 joblib>=1.3.0       # model serialisation (used in Phase 2)
 python-dotenv>=1.0.0  # .env file for API key management
