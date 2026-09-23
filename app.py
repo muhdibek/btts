@@ -35,6 +35,7 @@ from data.live_fixtures     import (DEFAULT_LEAGUES, LEAGUES as LIVE_LEAGUES,
                                    feed_status, load_leagues, malformed_score_count,
                                    next_matchday)
 from models.btts_model      import score_matches, get_confidence_label
+from models.match_result     import build_match_result_card
 from utils.filters          import (filter_high_probability_matches, filter_todays_matches,
                                    get_filter_summary)
 from utils.slip_generator   import (generate_slips, slips_to_dataframe,
@@ -346,8 +347,25 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     live_mode = source == "Live fixtures"
+
+    market_choice = st.radio(
+        "Market",
+        ["Match Result (1X2)", "Both Teams To Score"],
+        index=0,
+        help="Match result is the market the backtest found signal in "
+             "(AUC 0.672). BTTS scored no better than the league base rate.",
+        label_visibility="collapsed",
+    )
+    result_mode = market_choice.startswith("Match Result")
+
+    if result_mode and not live_mode:
+        st.caption("⚠️ Match result needs real results to fit on — "
+                   "switching the source to live fixtures.")
+        live_mode = True
+        source = "Live fixtures"
     # Live feed has no bookmaker prices, so odds shown are 1 / probability.
     odds_label = "Fair Odds" if live_mode else "BTTS Odds"
+    prob_label = "Win Prob" if result_mode else "BTTS Prob"
 
     if live_mode:
         live_league_codes = st.multiselect(
@@ -362,9 +380,14 @@ with st.sidebar:
     # --- Filter thresholds ---
     st.markdown("**🎯 Probability Filter**")
     min_btts_prob = st.slider(
-        "Min BTTS Probability (%)",
-        min_value=40, max_value=90, value=55, step=1,
-        help="Only show matches where BTTS probability ≥ this value"
+        f"Min {prob_label} (%)",
+        min_value=25, max_value=90,
+        # A 1X2 favourite is often priced under 50%, so a BTTS-shaped floor of
+        # 55% would hide most of the card.
+        value=40 if result_mode else 55, step=1,
+        help=("Only show fixtures whose most likely outcome clears this"
+              if result_mode else
+              "Only show matches where BTTS probability ≥ this value"),
     ) / 100.0
 
     st.markdown("**📊 Attack / Defence**")
@@ -505,7 +528,29 @@ if live_mode:
         """)
         st.stop()
 
-    all_matches_df = add_fair_odds(score_matches(card_df))
+    if result_mode:
+        priced, result_meta = build_match_result_card(card_df, season_df)
+        priced = priced[priced["selection_prob"].notna()].reset_index(drop=True)
+
+        if priced.empty:
+            render_html("""
+            <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
+                        padding:16px; color:#f5d020; font-size:0.85rem;">
+                No league on this card has enough completed matches to fit a model yet.
+                Pick a later matchday, or switch the market to Both Teams To Score.
+            </div>
+            """)
+            st.stop()
+
+        # The rest of the app works off btts_prob / btts_odds; in this market
+        # those carry the chosen selection's probability and its fair price.
+        priced["btts_prob"]     = priced["selection_prob"]
+        priced["btts_prob_pct"] = (priced["selection_prob"] * 100).round(1).astype(str) + "%"
+        all_matches_df = add_fair_odds(priced)
+    else:
+        result_meta = {}
+        all_matches_df = add_fair_odds(score_matches(card_df))
+
     odds_are_fair  = True
     live_meta = {
         "day":        chosen_day,
@@ -514,6 +559,8 @@ if live_mode:
         "unusable":   malformed_score_count(season_df),
         "fetched":    feed_status(["2026-27", "2025-26"], live_league_codes).get("last_fetched"),
     }
+    # Merged last so the market's own fit summary survives.
+    live_meta.update(result_meta)
 else:
     all_matches_df = get_scored_matches()
     if today_only:
@@ -527,8 +574,11 @@ if include_trebles: slip_sizes.append(3)
 filtered_df = filter_high_probability_matches(
     df               = all_matches_df,
     min_btts_prob    = min_btts_prob,
-    min_avg_scored   = min_avg_scored,
-    max_avg_conceded = max_avg_conceded,
+    # The attack/defence thresholds encode a BTTS idea — both sides likely to
+    # score. They say nothing about who wins, so they are stood down on the
+    # match-result market rather than quietly shrinking the card.
+    min_avg_scored   = 0.0 if result_mode else min_avg_scored,
+    max_avg_conceded = 0.0 if result_mode else max_avg_conceded,
     min_btts_odds    = odds_range[0],
     max_btts_odds    = odds_range[1],
 )
@@ -549,7 +599,7 @@ with col_title:
                      letter-spacing:0.05em;"> AI DASHBOARD</span>
         <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;
                     text-transform:uppercase; letter-spacing:0.15em;">
-            Both Teams To Score · Local Intelligence ·
+            {"Match Result · 1X2" if result_mode else "Both Teams To Score"} · Local Intelligence ·
             {"Live Fixtures" if live_mode else "Synthetic Demo Card"}
         </div>
     </div>
@@ -579,8 +629,8 @@ render_html("<div style='margin-bottom:4px;'></div>")
 k1, k2, k3, k4, k5 = st.columns(5)
 kpis = [
     (k1, str(summary["total_matches"]),     "Total Fixtures"),
-    (k2, str(summary["filtered_matches"]),  "BTTS Candidates"),
-    (k3, f"{summary['avg_btts_prob']}%",    "Avg BTTS Prob"),
+    (k2, str(summary["filtered_matches"]),  "Selections" if result_mode else "BTTS Candidates"),
+    (k3, f"{summary['avg_btts_prob']}%",    f"Avg {prob_label}"),
     (k4, f"{summary['max_btts_prob']}%",    "Best Match Prob"),
     (k5, str(len(st.session_state.slips)),  "Slips Generated"),
 ]
@@ -602,16 +652,27 @@ if live_mode:
         {live_meta['leagues']} leagues · team form built from
         <strong style="color:#e8eaf0;">{live_meta['results']:,}</strong> completed matches
         (this season and last){f" · feed fetched {fetched:%d %b %H:%M}" if fetched is not None else ""}
-        {f" · {live_meta['unusable']} matches skipped for unusable scores" if live_meta['unusable'] else ""}.
+        {f" · {live_meta['unusable']} matches skipped for unusable scores" if live_meta['unusable'] else ""}
+        {f" · Poisson models fitted per league on {live_meta['training_matches']:,} results "
+          f"({live_meta['leagues_fitted']} leagues)" if result_mode and 'leagues_fitted' in live_meta else ""}.
         <br>
         <strong style="color:#f5d020;">Odds below are FAIR odds (1 / probability), not
         bookmaker prices</strong> — this feed carries no market odds. A real book pays less,
         so any return shown is a ceiling, not a payout.
         <br>
-        <strong style="color:#ff9d00;">These probabilities have no measured edge.</strong>
-        Backtested on 154k historical matches, this heuristic and four statistical models all
-        scored worse than simply using the league BTTS base rate. Treat the numbers as
-        descriptive, not predictive — see the README bake-off results.
+        {(
+            "<strong style='color:#00ff88;'>This market has measured signal.</strong> "
+            "Backtested walk-forward over 8,770 Premier League matches, the Poisson model "
+            "scored AUC 0.672 and +6.9% skill against the base rate on match result. "
+            "<strong style='color:#f5d020;'>Skill against the base rate is not an edge against "
+            "a bookmaker</strong> — no prices are available here, so nothing below has been "
+            "shown to beat a market."
+            if result_mode else
+            "<strong style='color:#ff9d00;'>These probabilities have no measured edge.</strong> "
+            "Backtested on 154k historical matches, this heuristic and four statistical models "
+            "all scored worse than simply using the league BTTS base rate. Treat the numbers as "
+            "descriptive, not predictive — see the README bake-off results."
+        )}
     </div>
     """)
 
@@ -632,6 +693,15 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
         
         # Row background for high-prob matches
         row_style = "background: #0d1a2e;" if prob >= highlight_threshold else ""
+
+        # On the match-result market each row also names the outcome backed.
+        # The header adds this column too — both must agree or every cell
+        # after it shifts one place left.
+        selection_cell = ""
+        if result_mode:
+            pick = row.get("selection_label") or "—"
+            selection_cell = (f'<td style="color:#00e5ff; font-size:0.78rem; '
+                              f'font-weight:700;">{pick}</td>')
         
         rows_html += f"""
         <tr style="{row_style}">
@@ -640,6 +710,7 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
                 <span style="color:#8892a4; font-size:0.72rem;"> vs </span>
                 <strong>{row['away_team']}</strong></td>
             <td style="color:#8892a4;">{row['league']}</td>
+            {selection_cell}
             <td>
                 <span class="prob-badge" style="background:{color}22; color:{color};
                       border:1px solid {color}44;">{prob_pct}</span>
@@ -662,7 +733,8 @@ def render_matches_table(df: pd.DataFrame, highlight_threshold: float = 0.62):
                 <th>Kickoff</th>
                 <th>Match</th>
                 <th>League</th>
-                <th>BTTS Prob</th>
+                {'<th>Selection</th>' if result_mode else ''}
+                <th>{prob_label}</th>
                 <th>Signal</th>
                 <th>{odds_label}</th>
                 <th>Avg Scored H/A</th>
@@ -682,8 +754,8 @@ with st.expander("View All Matches", expanded=False):
 # ============================================================
 #  SECTION 2: FILTERED HIGH-PROBABILITY MATCHES
 # ============================================================
-render_html("""
-<div class="section-header"><h3>02 · High Probability BTTS Candidates</h3></div>
+render_html(f"""
+<div class="section-header"><h3>02 · {"High Probability Selections" if result_mode else "High Probability BTTS Candidates"}</h3></div>
 """)
 
 if filtered_df.empty:
@@ -697,7 +769,7 @@ else:
     render_html(
         f"<div style='font-size:0.75rem; color:#8892a4; margin-bottom:8px;'>"
         f"Showing <strong style='color:#00e5ff;'>{len(filtered_df)}</strong> of "
-        f"{len(all_matches_df)} fixtures · Filter: BTTS ≥ {min_btts_prob*100:.0f}%"
+        f"{len(all_matches_df)} fixtures · Filter: {prob_label} ≥ {min_btts_prob*100:.0f}%"
         f"</div>")
     render_matches_table(filtered_df, highlight_threshold=0.0)
 
@@ -1004,7 +1076,7 @@ else:
                     <div style="font-size:0.88rem; font-weight:700;
                                 color:#e8eaf0; margin-top:2px;">{match}</div>
                     <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;">
-                        Market: Both Teams To Score
+                        Market: {"Match Result" if result_mode else "Both Teams To Score"}
                     </div>
                 </div>
                 <div style="text-align:right;">

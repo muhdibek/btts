@@ -22,7 +22,8 @@ btts_dashboard/
 │
 ├── models/
 │   ├── __init__.py
-│   ├── btts_model.py             ← Dashboard's heuristic model
+│   ├── btts_model.py             ← Dashboard's heuristic BTTS model
+│   ├── match_result.py           ← 1X2 pricing from per-league Poisson fits
 │   ├── goal_models.py            ← Poisson / Dixon-Coles / negative binomial / Skellam
 │   ├── evaluate.py               ← Log loss, Brier, calibration, ROI
 │   ├── synthetic.py              ← Match generators with a known process
@@ -245,6 +246,28 @@ Two rules for whatever trains on this:
 ### Phase 2C — Historical Data Source
 - [football-data.co.uk](https://www.football-data.co.uk) — free CSV files with match results
 - Use to build your labelled training set for the XGBoost model
+
+---
+
+## Markets
+
+The sidebar picks the market, and **Match Result (1X2) is the default** — it is the
+one the bake-off found signal in.
+
+| Market | Backtest (walk-forward, 8,770 PL matches) |
+|---|---|
+| **Match result** | AUC **0.672**, **+6.9%** skill over the base rate |
+| Both teams to score | AUC 0.513, worse than the base rate |
+
+On match result the app fits a **Poisson model per league** on completed matches
+from this season and last (~2,200 results), cut off at the card's first kickoff, then
+prices every fixture's home/draw/away and backs its most likely outcome. Leagues
+with too little history are left unpriced rather than guessed at.
+
+One caveat the UI repeats and that should not be skipped: **skill against the base
+rate is not an edge against a bookmaker.** The base rate is a weak opponent; a
+closing price is not. No odds source here carries prices for these fixtures, so
+nothing in the app has been shown to beat a market.
 
 ---
 
