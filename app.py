@@ -36,6 +36,9 @@ from data.live_fixtures     import (DEFAULT_LEAGUES, LEAGUES as LIVE_LEAGUES,
                                    next_matchday)
 from models.btts_model      import score_matches, get_confidence_label
 from models.match_result     import build_match_result_card
+from data.international     import (DEFAULT_SINCE, fit_international_model,
+                                   load_results, price_fixture, rateable_teams,
+                                   recent_form, team_match_counts)
 from utils.filters          import (filter_high_probability_matches, filter_todays_matches,
                                    get_filter_summary)
 from utils.slip_generator   import (generate_slips, slips_to_dataframe,
@@ -340,13 +343,15 @@ with st.sidebar:
     st.markdown("**📡 Data Source**")
     source = st.radio(
         "Fixtures",
-        ["Live fixtures", "Sample data"],
+        ["Live fixtures", "Sample data", "International (manual)"],
         index=0,
         help="Live: real fixtures and real team form from the openfootball feed. "
-             "Sample: the synthetic demo card.",
+             "Sample: the synthetic demo card. International: pick any two "
+             "national teams — no fixture list exists for internationals.",
         label_visibility="collapsed",
     )
     live_mode = source == "Live fixtures"
+    international_mode = source.startswith("International")
 
     market_choice = st.radio(
         "Market",
@@ -358,7 +363,7 @@ with st.sidebar:
     )
     result_mode = market_choice.startswith("Match Result")
 
-    if result_mode and not live_mode:
+    if result_mode and not live_mode and not international_mode:
         st.caption("⚠️ Match result needs real results to fit on — "
                    "switching the source to live fixtures.")
         live_mode = True
@@ -377,66 +382,77 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # --- Filter thresholds ---
-    st.markdown("**🎯 Probability Filter**")
-    min_btts_prob = st.slider(
-        f"Min {prob_label} (%)",
-        min_value=25, max_value=90,
-        # A 1X2 favourite is often priced under 50%, so a BTTS-shaped floor of
-        # 55% would hide most of the card.
-        value=40 if result_mode else 55, step=1,
-        help=("Only show fixtures whose most likely outcome clears this"
-              if result_mode else
-              "Only show matches where BTTS probability ≥ this value"),
-    ) / 100.0
+    # The filters, slip settings and matchday picker all describe a fixture
+    # CARD. The international pricer has no card — it prices one pairing you
+    # choose — so none of them apply and showing them would imply they do.
+    if not international_mode:
+        # --- Filter thresholds ---
+        st.markdown("**🎯 Probability Filter**")
+        min_btts_prob = st.slider(
+            f"Min {prob_label} (%)",
+            min_value=25, max_value=90,
+            # A 1X2 favourite is often priced under 50%, so a BTTS-shaped floor of
+            # 55% would hide most of the card.
+            value=40 if result_mode else 55, step=1,
+            help=("Only show fixtures whose most likely outcome clears this"
+                  if result_mode else
+                  "Only show matches where BTTS probability ≥ this value"),
+        ) / 100.0
 
-    st.markdown("**📊 Attack / Defence**")
-    min_avg_scored = st.slider(
-        "Min Avg Goals Scored",
-        min_value=0.5, max_value=2.5, value=1.1, step=0.1
-    )
-    max_avg_conceded = st.slider(
-        "Min Avg Goals Conceded (weakness)",
-        min_value=0.8, max_value=2.5, value=1.3, step=0.1
-    )
+        st.markdown("**📊 Attack / Defence**")
+        min_avg_scored = st.slider(
+            "Min Avg Goals Scored",
+            min_value=0.5, max_value=2.5, value=1.1, step=0.1
+        )
+        max_avg_conceded = st.slider(
+            "Min Avg Goals Conceded (weakness)",
+            min_value=0.8, max_value=2.5, value=1.3, step=0.1
+        )
 
-    st.markdown(f"**💰 {odds_label} Range**")
-    odds_range = st.slider(
-        f"{odds_label} Range",
-        min_value=1.3, max_value=3.0,
-        value=(1.30, 3.00) if live_mode else (1.55, 2.20), step=0.05,
-        help=("Fair odds are 1 / probability, so this range is just a probability "
-              "window in disguise — a low ceiling here removes your most likely "
-              "matches, not your worst ones.") if live_mode
-             else "Acceptable bookmaker price window",
-    )
+        st.markdown(f"**💰 {odds_label} Range**")
+        odds_range = st.slider(
+            f"{odds_label} Range",
+            min_value=1.3, max_value=3.0,
+            value=(1.30, 3.00) if live_mode else (1.55, 2.20), step=0.05,
+            help=("Fair odds are 1 / probability, so this range is just a probability "
+                  "window in disguise — a low ceiling here removes your most likely "
+                  "matches, not your worst ones.") if live_mode
+                 else "Acceptable bookmaker price window",
+        )
 
-    st.markdown("**🎰 Slip Settings**")
-    min_total_odds = st.slider(
-        "Min Total Slip Odds",
-        min_value=2.0, max_value=6.0, value=3.0, step=0.1
-    )
-    include_doubles  = st.checkbox("Include 2-Match Slips",  value=True)
-    include_trebles  = st.checkbox("Include 3-Match Slips",  value=True)
-    max_slips_shown  = st.slider("Max Slips to Show", 5, 30, 15)
+        st.markdown("**🎰 Slip Settings**")
+        min_total_odds = st.slider(
+            "Min Total Slip Odds",
+            min_value=2.0, max_value=6.0, value=3.0, step=0.1
+        )
+        include_doubles  = st.checkbox("Include 2-Match Slips",  value=True)
+        include_trebles  = st.checkbox("Include 3-Match Slips",  value=True)
+        max_slips_shown  = st.slider("Max Slips to Show", 5, 30, 15)
 
-    st.markdown("**🎯 Target Odds Slip**")
-    target_odds = st.number_input(
-        "Target Total Odds",
-        min_value=2.0, max_value=200.0, value=25.0, step=1.0,
-        help="Payout multiple the accumulator must reach — e.g. 25.0 for a 25 odds slip"
-    )
-    max_target_legs = st.slider(
-        "Max Legs in Target Slip",
-        min_value=2, max_value=8, value=8,
-        help="BTTS prices around 1.6–1.9 usually need 5–7 legs to reach 25.0"
-    )
-    stake = st.number_input("Stake (units)", min_value=1.0, max_value=1000.0, value=10.0, step=1.0)
+        st.markdown("**🎯 Target Odds Slip**")
+        target_odds = st.number_input(
+            "Target Total Odds",
+            min_value=2.0, max_value=200.0, value=25.0, step=1.0,
+            help="Payout multiple the accumulator must reach — e.g. 25.0 for a 25 odds slip"
+        )
+        max_target_legs = st.slider(
+            "Max Legs in Target Slip",
+            min_value=2, max_value=8, value=8,
+            help="BTTS prices around 1.6–1.9 usually need 5–7 legs to reach 25.0"
+        )
+        stake = st.number_input("Stake (units)", min_value=1.0, max_value=1000.0, value=10.0, step=1.0)
 
-    if not live_mode:
-        st.markdown("**📅 Match Day**")
-        today_only = st.checkbox("Today's fixtures only", value=True)
+        if not live_mode:
+            st.markdown("**📅 Match Day**")
+            today_only = st.checkbox("Today's fixtures only", value=True)
+        else:
+            today_only = False
+
     else:
+        min_btts_prob, min_avg_scored, max_avg_conceded = 0.55, 1.1, 1.3
+        odds_range, min_total_odds = (1.30, 3.00), 3.0
+        include_doubles = include_trebles = True
+        max_slips_shown, target_odds, max_target_legs, stake = 15, 25.0, 8, 10.0
         today_only = False
 
     st.markdown("---")
@@ -484,6 +500,146 @@ def add_fair_odds(df: pd.DataFrame) -> pd.DataFrame:
     if missing.any():
         df.loc[missing, "btts_odds"] = [fair_odds(p) for p in df.loc[missing, "btts_prob"]]
     return df
+
+
+# ============================================================
+#  INTERNATIONAL — MANUAL PAIRING
+# ============================================================
+# National-team football has no fixture feed reachable from here, so there is
+# no card to build. You name the two teams instead.
+if international_mode:
+    @st.cache_data(ttl=86400, show_spinner="Loading international results …")
+    def get_international_results(since: str) -> pd.DataFrame:
+        return load_results(since=since)
+
+    @st.cache_resource(show_spinner="Fitting national-team ratings …")
+    def get_international_model(since: str):
+        return fit_international_model(load_results(since=since))
+
+    results = get_international_results(DEFAULT_SINCE)
+    teams   = rateable_teams(results)
+    counts  = team_match_counts(results)
+
+    render_html(f"""
+    <div style="padding: 8px 0 4px 0;">
+        <span style="font-size:1.6rem; font-weight:800; color:#e8eaf0;
+                     letter-spacing:0.05em;">INTERNATIONAL</span>
+        <span style="font-size:1.6rem; font-weight:800; color:#00e5ff;
+                     letter-spacing:0.05em;"> MATCH PRICER</span>
+        <div style="font-size:0.7rem; color:#8892a4; margin-top:2px;
+                    text-transform:uppercase; letter-spacing:0.15em;">
+            Manual Pairing · {len(teams)} National Teams · {len(results):,} Results
+            Since {DEFAULT_SINCE[:4]}
+        </div>
+    </div>
+    """)
+
+    render_html("""
+    <div style="background:#0d1525; border:1px solid #1e2d45; border-left:2px solid #f5d020;
+                border-radius:6px; padding:12px 16px; margin:12px 0;
+                font-size:0.72rem; color:#8892a4; line-height:1.6;">
+        <strong style="color:#f5d020;">Why manual?</strong> No source reachable from here
+        lists upcoming international fixtures — the results archive is history only. So you
+        pick the pairing.
+        <br>
+        <strong style="color:#ff9d00;">Held to a lower standard than the club pages.</strong>
+        The bake-off validated these models on club leagues; nothing here has been backtested
+        on international football. National sides play a handful of matches a year, squads
+        turn over, and friendlies are played with reserves — so treat this as a considered
+        estimate, not a tested one.
+    </div>
+    """)
+
+    pick_home, pick_away, pick_venue = st.columns([2, 2, 1])
+    with pick_home:
+        home_team = st.selectbox("Home / first team", teams,
+                                 index=teams.index("Uzbekistan") if "Uzbekistan" in teams else 0)
+    with pick_away:
+        others = [t for t in teams if t != home_team]
+        away_team = st.selectbox("Away / second team", others,
+                                 index=others.index("Iran") if "Iran" in others else 0)
+    with pick_venue:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        neutral = st.checkbox("Neutral venue", value=True,
+                              help="On neutral ground the home-advantage term is dropped.")
+
+    model  = get_international_model(DEFAULT_SINCE)
+    priced = price_fixture(model, home_team, away_team, neutral=neutral)
+
+    thin = [t for t in (home_team, away_team) if counts.get(t, 0) < 10]
+    if thin:
+        render_html(f"""
+        <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
+                    padding:10px 14px; margin:8px 0; color:#f5d020; font-size:0.75rem;">
+            ⚠️ Thin data: {", ".join(f"{t} ({int(counts.get(t, 0))} matches)" for t in thin)}
+            since {DEFAULT_SINCE[:4]}. Ratings built on this little are unreliable.
+        </div>
+        """)
+
+    outcomes = [
+        (f"{home_team} win", priced["p_home"], "#00ff88"),
+        ("Draw",             priced["p_draw"], "#f5d020"),
+        (f"{away_team} win", priced["p_away"], "#00e5ff"),
+    ]
+    cards = "".join(f"""
+        <div class="metric-card" style="border-top-color:{colour};">
+            <div style="font-size:0.65rem; color:#8892a4; text-transform:uppercase;
+                        letter-spacing:0.08em;">{name}</div>
+            <div style="font-size:1.8rem; font-weight:800; color:{colour};
+                        line-height:1.2;">{prob*100:.1f}%</div>
+            <div style="font-size:0.7rem; color:#8892a4;">fair odds
+                <strong style="color:#f5d020;">{(1/prob if prob > 0 else float("inf")):.2f}</strong>
+            </div>
+        </div>
+    """ for name, prob, colour in outcomes)
+
+    render_html(f"""
+    <div class="metric-row" style="margin-top:16px;">{cards}</div>
+    <div class="metric-row">
+        <div class="metric-card">
+            <div style="font-size:0.65rem; color:#8892a4; text-transform:uppercase;">Expected goals</div>
+            <div style="font-size:1.4rem; font-weight:700; color:#e8eaf0;">
+                {priced['xg_home']} – {priced['xg_away']}</div>
+        </div>
+        <div class="metric-card">
+            <div style="font-size:0.65rem; color:#8892a4; text-transform:uppercase;">Both teams to score</div>
+            <div style="font-size:1.4rem; font-weight:700; color:#e8eaf0;">
+                {priced['p_btts']*100:.1f}%</div>
+        </div>
+        <div class="metric-card">
+            <div style="font-size:0.65rem; color:#8892a4; text-transform:uppercase;">Over 2.5 goals</div>
+            <div style="font-size:1.4rem; font-weight:700; color:#e8eaf0;">
+                {priced['p_over25']*100:.1f}%</div>
+        </div>
+        <div class="metric-card">
+            <div style="font-size:0.65rem; color:#8892a4; text-transform:uppercase;">Venue</div>
+            <div style="font-size:1.4rem; font-weight:700; color:#e8eaf0;">
+                {"Neutral" if neutral else home_team}</div>
+        </div>
+    </div>
+    """)
+
+    render_html('<div class="section-header"><h3>Recent Form</h3></div>')
+    form_left, form_right = st.columns(2)
+    for column, team in ((form_left, home_team), (form_right, away_team)):
+        with column:
+            st.markdown(f"**{team}** · last 8")
+            form = recent_form(results, team, window=8)
+            if form.empty:
+                st.caption("No matches in the window.")
+            else:
+                st.dataframe(form, hide_index=True, use_container_width=True)
+
+    render_html("""
+    <div style="margin-top:16px; padding:10px 14px; background:#0a1220;
+                border-radius:4px; border-left:2px solid #7c3aed;">
+        <span style="font-size:0.7rem; color:#8892a4;">
+            Fair odds are 1 / probability with no bookmaker margin — a real book pays less.
+            For research only. Gamble responsibly.
+        </span>
+    </div>
+    """)
+    st.stop()
 
 
 # ---- Load data ----------------------------------------------------------

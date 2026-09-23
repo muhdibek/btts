@@ -48,6 +48,8 @@ from scipy.stats import skellam
 
 
 MAX_GOALS = 10          # scoreline grid: 0..10 covers >99.9% of football matches
+MIN_RATE_GOALS = 0.05   # λ floor
+MAX_RATE_GOALS = 6.0    # λ ceiling — above this no real fixture lives
 MIN_RATE  = 1e-6
 MAX_RATE  = 1 - 1e-6
 
@@ -98,23 +100,27 @@ class GoalModel:
     def fit(self, matches: pd.DataFrame) -> "GoalModel":
         raise NotImplementedError
 
-    def predict_grid(self, home_team: str, away_team: str) -> np.ndarray | None:
+    def predict_grid(self, home_team: str, away_team: str,
+                     neutral: bool = False) -> np.ndarray | None:
         """Joint scoreline distribution, or None if the model does not have one."""
         return None
 
-    def predict_markets(self, home_team: str, away_team: str) -> dict[str, float]:
-        grid = self.predict_grid(home_team, away_team)
+    def predict_markets(self, home_team: str, away_team: str,
+                        neutral: bool = False) -> dict[str, float]:
+        grid = self.predict_grid(home_team, away_team, neutral=neutral)
         if grid is None:
             return {k: np.nan for k in
                     ("p_btts", "p_over25", "p_home", "p_draw", "p_away")}
         return markets_from_grid(grid)
 
-    def predict_btts(self, home_team: str, away_team: str) -> float:
-        return self.predict_markets(home_team, away_team)["p_btts"]
+    def predict_btts(self, home_team: str, away_team: str,
+                     neutral: bool = False) -> float:
+        return self.predict_markets(home_team, away_team, neutral=neutral)["p_btts"]
 
     def predict_frame(self, matches: pd.DataFrame) -> pd.DataFrame:
         """Run predict_markets() over a match table; returns one row per match."""
-        rows = [self.predict_markets(m.home_team, m.away_team)
+        rows = [self.predict_markets(m.home_team, m.away_team,
+                                     neutral=bool(getattr(m, "neutral", False)))
                 for m in matches.itertuples(index=False)]
         return pd.DataFrame(rows, index=matches.index)
 
@@ -148,7 +154,8 @@ class BaseRateModel(GoalModel):
         }
         return self
 
-    def predict_markets(self, home_team: str, away_team: str) -> dict[str, float]:
+    def predict_markets(self, home_team: str, away_team: str,
+                        neutral: bool = False) -> dict[str, float]:
         return dict(self.rates)
 
 
@@ -186,7 +193,8 @@ class TeamRateModel(GoalModel):
         self.other = BaseRateModel().fit(matches).rates
         return self
 
-    def predict_markets(self, home_team: str, away_team: str) -> dict[str, float]:
+    def predict_markets(self, home_team: str, away_team: str,
+                        neutral: bool = False) -> dict[str, float]:
         home = self.team_btts.get(home_team, self.fallback)
         away = self.team_btts.get(away_team, self.fallback)
         out  = dict(self.other)
@@ -209,15 +217,31 @@ class RatingFit:
     extra:      dict[str, float] = field(default_factory=dict)
     converged:  bool = False
 
-    def rates(self, home_team: str, away_team: str) -> tuple[float, float]:
-        """Expected goals (λ) for the home and away side."""
+    def rates(self, home_team: str, away_team: str,
+              neutral: bool = False) -> tuple[float, float]:
+        """
+        Expected goals (λ) for the home and away side.
+
+        `neutral` drops the home-advantage term — for a match on neutral
+        ground, "home" is only a label on the fixture.
+        """
         atk_h = self.attack.get(home_team, 0.0)
         atk_a = self.attack.get(away_team, 0.0)
         def_h = self.defence.get(home_team, 0.0)
         def_a = self.defence.get(away_team, 0.0)
-        lam_home = np.exp(self.intercept + self.home_adv + atk_h - def_a)
+        advantage = 0.0 if neutral else self.home_adv
+        lam_home = np.exp(self.intercept + advantage + atk_h - def_a)
         lam_away = np.exp(self.intercept + atk_a - def_h)
-        return float(lam_home), float(lam_away)
+
+        # Pairings the ratings were never fitted on — the best side in the
+        # world against the weakest — extrapolate to expected-goal figures no
+        # football match has produced (14 goals, say), which also degenerates
+        # the scoreline grid since it only runs to MAX_GOALS. The rates are
+        # clamped to a range real matches actually occupy; a fixture pinned to
+        # the ceiling is the model saying "far outside what I have seen", not a
+        # forecast to take literally.
+        return (float(np.clip(lam_home, MIN_RATE_GOALS, MAX_RATE_GOALS)),
+                float(np.clip(lam_away, MIN_RATE_GOALS, MAX_RATE_GOALS)))
 
 
 def _time_weights(matches: pd.DataFrame, half_life_days: float | None) -> np.ndarray:
@@ -247,9 +271,21 @@ class PoissonModel(GoalModel):
 
     name = "poisson"
 
-    def __init__(self, half_life_days: float | None = None, max_goals: int = MAX_GOALS):
+    def __init__(self, half_life_days: float | None = None, max_goals: int = MAX_GOALS,
+                 max_iter: int = 500, max_fun: int | None = None, ridge: float = 0.0):
         self.half_life_days = half_life_days
         self.max_goals = max_goals
+        # A club league fits ~40 parameters and converges well inside the
+        # defaults. International football fits hundreds, and since the
+        # gradient is numerical each iteration costs one evaluation per
+        # parameter — so the FUNCTION-EVALUATION budget binds long before the
+        # iteration count, and a truncated fit reports converged=False.
+        self.max_iter = max_iter
+        self.max_fun  = max_fun
+        # Ridge shrinkage on the ratings. Default 0 keeps club fits exactly as
+        # they were backtested. A small positive value stops a team with three
+        # matches from earning an extreme rating it has not evidenced.
+        self.ridge = ridge
         self.fit_result = RatingFit()
 
     # --- likelihood ---------------------------------------------------------
@@ -268,15 +304,19 @@ class PoissonModel(GoalModel):
                 ag * np.log(lam_away) - lam_away)
 
     def _negative_log_likelihood(self, params, home_idx, away_idx, hg, ag,
-                                 weights, n_teams):
+                                 weights, n_teams, neutral=None):
         intercept, home_adv, attack, defence = self._unpack(params, n_teams)
-        lam_home = np.exp(intercept + home_adv + attack[home_idx] - defence[away_idx])
+        # On neutral ground there is no home side to advantage.
+        advantage = home_adv if neutral is None else home_adv * (1.0 - neutral)
+        lam_home = np.exp(intercept + advantage + attack[home_idx] - defence[away_idx])
         lam_away = np.exp(intercept + attack[away_idx] - defence[home_idx])
         lam_home = np.clip(lam_home, 1e-8, 25.0)
         lam_away = np.clip(lam_away, 1e-8, 25.0)
 
         terms = self._log_likelihood_terms(lam_home, lam_away, hg, ag, params, n_teams)
-        return -float(np.sum(weights * terms))
+        penalty = (self.ridge * float(np.sum(attack ** 2) + np.sum(defence ** 2))
+                   if self.ridge else 0.0)
+        return -float(np.sum(weights * terms)) + penalty
 
     def _initial_params(self, n_teams: int, hg, ag) -> np.ndarray:
         mean_goals = max(float(np.mean(np.concatenate([hg, ag]))), 0.1)
@@ -303,6 +343,11 @@ class PoissonModel(GoalModel):
         hg = matches["fthg"].to_numpy(dtype=float)
         ag = matches["ftag"].to_numpy(dtype=float)
         weights = _time_weights(matches, self.half_life_days)
+        # Optional: a 'neutral' column marks matches played on neutral ground,
+        # which is the norm in international tournaments and never happens in
+        # league football. Absent, every match is treated as having a host.
+        neutral = (matches["neutral"].astype(float).to_numpy()
+                   if "neutral" in matches.columns else None)
 
         start = self._initial_params(n, hg, ag)
         if self._extra_param_count():
@@ -312,10 +357,11 @@ class PoissonModel(GoalModel):
         result = minimize(
             self._negative_log_likelihood,
             start,
-            args=(home_idx, away_idx, hg, ag, weights, n),
+            args=(home_idx, away_idx, hg, ag, weights, n, neutral),
             method="L-BFGS-B",
             bounds=self._bounds(n),
-            options={"maxiter": 500},
+            options={"maxiter": self.max_iter,
+                     "maxfun": self.max_fun or max(15000, 60 * len(start))},
         )
 
         intercept, home_adv, attack, defence = self._unpack(result.x, n)
@@ -341,8 +387,9 @@ class PoissonModel(GoalModel):
         k = np.arange(self.max_goals + 1)
         return np.exp(k * np.log(lam) - lam - gammaln(k + 1))
 
-    def predict_grid(self, home_team: str, away_team: str) -> np.ndarray:
-        lam_home, lam_away = self.fit_result.rates(home_team, away_team)
+    def predict_grid(self, home_team: str, away_team: str,
+                     neutral: bool = False) -> np.ndarray:
+        lam_home, lam_away = self.fit_result.rates(home_team, away_team, neutral=neutral)
         return np.outer(self._marginal_pmf(lam_home), self._marginal_pmf(lam_away))
 
 
@@ -398,8 +445,9 @@ class DixonColesModel(PoissonModel):
     def _store_extra(self, params: np.ndarray, n_teams: int) -> dict[str, float]:
         return {"rho": float(params[-1])}
 
-    def predict_grid(self, home_team: str, away_team: str) -> np.ndarray:
-        lam_home, lam_away = self.fit_result.rates(home_team, away_team)
+    def predict_grid(self, home_team: str, away_team: str,
+                     neutral: bool = False) -> np.ndarray:
+        lam_home, lam_away = self.fit_result.rates(home_team, away_team, neutral=neutral)
         grid = np.outer(self._marginal_pmf(lam_home), self._marginal_pmf(lam_away))
 
         rho = self.fit_result.extra.get("rho", 0.0)
@@ -472,11 +520,13 @@ class SkellamModel(PoissonModel):
 
     name = "skellam"
 
-    def predict_grid(self, home_team: str, away_team: str) -> None:
+    def predict_grid(self, home_team: str, away_team: str,
+                     neutral: bool = False) -> None:
         return None
 
-    def predict_markets(self, home_team: str, away_team: str) -> dict[str, float]:
-        lam_home, lam_away = self.fit_result.rates(home_team, away_team)
+    def predict_markets(self, home_team: str, away_team: str,
+                        neutral: bool = False) -> dict[str, float]:
+        lam_home, lam_away = self.fit_result.rates(home_team, away_team, neutral=neutral)
         return {
             "p_btts":   np.nan,          # structurally unavailable — see docstring
             "p_over25": np.nan,

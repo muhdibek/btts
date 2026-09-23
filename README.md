@@ -16,6 +16,7 @@ btts_dashboard/
 │   ├── __init__.py
 │   ├── sample_data.py            ← Synthetic demo card (fallback source)
 │   ├── live_fixtures.py          ← Live fixtures + real team form (openfootball)
+│   ├── international.py          ← National-team results, ratings and pricing
 │   ├── football_data.py          ← football-data.co.uk ingestion + cache
 │   ├── features.py               ← Pre-match feature engineering (leak-free)
 │   └── build_dataset.py          ← CLI: build the labelled training set
@@ -268,6 +269,44 @@ One caveat the UI repeats and that should not be skipped: **skill against the ba
 rate is not an edge against a bookmaker.** The base rate is a weak opponent; a
 closing price is not. No odds source here carries prices for these fixtures, so
 nothing in the app has been shown to beat a market.
+
+---
+
+## International Matches (Manual Pairing)
+
+Pick **International (manual)** in the sidebar, choose any two national teams, and
+the app prices the match: 1X2 with fair odds, expected goals, BTTS, over 2.5, and
+both sides' last eight results.
+
+**Why manual?** No source reachable here lists upcoming international fixtures.
+`openfootball/national-teams` is a Ruby library with no data, the world-cup repo
+holds the finished 2026 tournament, and Euro 2028 is a venue skeleton with
+placeholder teams. What *does* exist is history:
+[martj42/international_results](https://github.com/martj42/international_results) —
+49,000+ results since 1872, with neutral-venue and competition flags. So the model
+can be fitted; it just has nothing to point itself at.
+
+Two things make internationals different, and both are handled explicitly:
+
+- **Neutral venues.** Tournament matches are routinely played on neutral ground,
+  where "home" is a label on the fixture. The fitted model learns a home-advantage
+  term and drops it for neutral matches. Pairings default to neutral, since a
+  made-up fixture has no host — assuming one would tilt every number toward
+  whichever team was typed first.
+- **Thin data.** A national side plays a handful of matches a year, so the fit uses
+  a date window (since 2022), exponential time decay (~18-month half-life),
+  friendlies at half weight, and **ridge shrinkage** on the ratings. Teams with
+  fewer than four matches in the window are not offered; fewer than ten triggers a
+  warning on the page.
+
+Expected goals are also **clamped to 6.0**. Asking for the best side in the world
+against the weakest is an extrapolation the ratings never saw, and the raw
+exponential produced 14 expected goals — not football, and it degenerates the
+scoreline grid.
+
+**Held to a lower standard than the club pages, and the UI says so.** The bake-off
+validated these models on club leagues. Nothing here has been backtested on
+international football.
 
 ---
 
