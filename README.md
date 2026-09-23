@@ -46,6 +46,7 @@ Opens at `http://localhost:8501`. Fixtures are fetched at run time; no API key n
 │   ├── live_fixtures.py          ← Live fixtures + real team form (openfootball)
 │   ├── international.py          ← National-team results, ratings and pricing
 │   ├── market_data.py            ← Historical matches WITH bookmaker odds
+│   ├── apifootball.py            ← APIFootball v3 client (forward odds)
 │   ├── football_data.py          ← football-data.co.uk ingestion + cache
 │   ├── features.py               ← Pre-match feature engineering (leak-free)
 │   ├── build_dataset.py          ← CLI: build the labelled training set
@@ -134,9 +135,29 @@ python -m models.bakeoff --synthetic negative_binomial --repeats 5
 | [xgabora/Club-Football-Match-Data](https://github.com/xgabora/Club-Football-Match-Data-2000-2025) | Market test | ~239k matches with closing odds, current to weeks |
 | [football-data.co.uk](https://www.football-data.co.uk) | Training datasets | Via a public mirror; the site itself is unreachable from some environments |
 
-**No forward odds.** Every odds API host tested was blocked by network policy, and no
-reachable free dataset publishes prices for matches not yet played. The dashboard
-therefore shows probabilities only, and cannot tell you whether a price is good value.
+### Forward odds
+
+`data/apifootball.py` is a client for [APIFootball v3](https://apiv3.apifootball.com),
+the one source tried here that carries **bookmaker odds for matches not yet played**.
+Prices are what turn "the model says 62%" into "the model says 62%, the market says
+55%" — the difference between a description and a claim.
+
+```bash
+export APIFOOTBALL_KEY=your_key
+python -m data.apifootball probe --out sample.json     # check the payload shape
+python -m data.apifootball odds --from 2026-10-09 --to 2026-10-12
+```
+
+**It is unverified against the live API.** It was written in an environment where the
+host is unreachable, so requests follow the documented API and parsing is deliberately
+tolerant: a renamed field costs one NaN column rather than the run, and `probe` prints
+what actually came back. Run `probe` first — its mapping check says how many expected
+fields were present.
+
+Other odds routes tried and closed: football-data.co.uk (historical only), the
+football-charts connector (free tier excludes odds — the archive is paid),
+the-odds-api / football-data.org / footballdata.io / sofascore (all blocked by the
+environment's network policy).
 
 ---
 
