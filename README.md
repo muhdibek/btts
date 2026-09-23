@@ -27,6 +27,7 @@ btts_dashboard/
 │   ├── match_result.py           ← 1X2 pricing from per-league Poisson fits
 │   ├── goal_models.py            ← Poisson / Dixon-Coles / negative binomial / Skellam
 │   ├── evaluate.py               ← Log loss, Brier, calibration, ROI
+│   ├── daily_picks.py            ← Day's best selections + ready-made slips
 │   ├── synthetic.py              ← Match generators with a known process
 │   └── bakeoff.py                ← CLI: score the models head to head
 │
@@ -307,6 +308,28 @@ scoreline grid.
 **Held to a lower standard than the club pages, and the UI says so.** The bake-off
 validated these models on club leagues. Nothing here has been backtested on
 international football.
+
+---
+
+## Daily Picks and Slips
+
+Every live page opens with the day's output rather than a table to read:
+
+- **Best 5 picks** — the card's most confident selections, each with a confidence
+  band and fair odds.
+- **Daily slips** — three ready-made accumulators in different shapes: a *banker
+  double* (the two most confident legs), a *balanced treble*, and a *long shot*
+  (five legs, low probability by construction). Each shows combined probability
+  and total fair odds.
+
+**"Best" means most confident, not best value.** Value is a comparison against a
+price, and no odds source reachable from this app covers these fixtures. A 78%
+pick the market has at 1.20 is a bad bet, and nothing here can tell you that.
+
+On the **International** page the slip is built by hand: price a pairing, choose
+the outcome, add it. Legs are multiplied as independent, which is fair for separate
+international fixtures — they share no pitch, squad or weather. That assumption is
+shakier on a single-day club card.
 
 ---
 

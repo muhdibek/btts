@@ -265,3 +265,72 @@ def test_bakeoff_reports_skellam_as_unscored(poisson_league):
     row = card.set_index("model").loc["skellam"]
     assert row["n"] == 0
     assert np.isnan(row["log_loss"])
+
+
+# ---------------------------------------------------------------------------
+# Daily picks and slips
+# ---------------------------------------------------------------------------
+
+def _card(probs: list[float]) -> pd.DataFrame:
+    """A minimal priced card, most confident first."""
+    return pd.DataFrame({
+        "kickoff":    [f"2026-10-18 1{i}:00" for i in range(len(probs))],
+        "league":     ["Test League"] * len(probs),
+        "home_team":  [f"Home{i}" for i in range(len(probs))],
+        "away_team":  [f"Away{i}" for i in range(len(probs))],
+        "btts_prob":  probs,
+        "selection_label": [f"Home{i} to win" for i in range(len(probs))],
+    })
+
+
+def test_picks_are_ranked_by_confidence():
+    from models.daily_picks import rank_picks
+    picks = rank_picks(_card([0.4, 0.8, 0.6]), top_n=2)
+    assert list(picks["btts_prob"]) == [0.8, 0.6]
+    assert picks["fair_odds"].iloc[0] == pytest.approx(1.25)
+
+
+def test_picks_skip_fixtures_that_could_not_be_priced():
+    from models.daily_picks import rank_picks
+    card = _card([0.7, np.nan, 0.5])
+    picks = rank_picks(card, top_n=5)
+    assert len(picks) == 2
+    assert picks["btts_prob"].notna().all()
+
+
+def test_confidence_bands_are_ordered():
+    from models.daily_picks import confidence_band
+    assert confidence_band(0.75)[0].endswith("Strong")
+    assert confidence_band(0.65)[0].endswith("Solid")
+    assert confidence_band(0.30)[0].endswith("Coin flip")
+    assert confidence_band(np.nan)[0] == "—"
+
+
+def test_daily_slips_come_in_three_shapes():
+    from models.daily_picks import build_daily_slips
+    slips = build_daily_slips(_card([0.8, 0.75, 0.7, 0.65, 0.6, 0.55]),
+                              label_column="selection_label")
+    assert [s["legs"] for s in slips] == [2, 3, 5]
+    assert [s["name"] for s in slips] == ["Banker double", "Balanced treble", "Long shot"]
+
+
+def test_slip_probability_is_the_product_of_its_legs():
+    from models.daily_picks import build_daily_slips
+    slips = build_daily_slips(_card([0.8, 0.5]), label_column="selection_label")
+    double = slips[0]
+    assert double["combined_prob"] == pytest.approx(40.0)
+    assert double["total_fair_odds"] == pytest.approx(2.5)
+
+
+def test_more_legs_means_lower_probability():
+    from models.daily_picks import build_daily_slips
+    slips = build_daily_slips(_card([0.8, 0.75, 0.7, 0.65, 0.6, 0.55]),
+                              label_column="selection_label")
+    probabilities = [s["combined_prob"] for s in slips]
+    assert probabilities == sorted(probabilities, reverse=True)
+
+
+def test_a_card_too_small_for_a_slip_returns_nothing():
+    from models.daily_picks import build_daily_slips
+    assert build_daily_slips(_card([0.8])) == []
+    assert build_daily_slips(pd.DataFrame()) == []

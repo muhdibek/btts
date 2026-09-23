@@ -36,6 +36,8 @@ from data.live_fixtures     import (DEFAULT_LEAGUES, LEAGUES as LIVE_LEAGUES,
                                    next_matchday)
 from models.btts_model      import score_matches, get_confidence_label
 from models.match_result     import build_match_result_card
+from models.daily_picks      import (build_daily_slips, confidence_band,
+                                    rank_picks, summarise_card)
 from data.international     import (DEFAULT_SINCE, fit_international_model,
                                    load_results, price_fixture, rateable_teams,
                                    recent_form, team_match_counts)
@@ -320,6 +322,8 @@ if "target_slips" not in st.session_state:
     st.session_state.target_slips = []
 if "target_generated" not in st.session_state:
     st.session_state.target_generated = False
+if "intl_slip" not in st.session_state:
+    st.session_state.intl_slip = []
 
 
 # ============================================================
@@ -619,6 +623,98 @@ if international_mode:
     </div>
     """)
 
+    # --- add this pairing to a slip -------------------------------------
+    render_html('<div class="section-header"><h3>Build a Slip</h3></div>')
+
+    pick_col, add_col = st.columns([3, 1])
+    outcome_options = {
+        f"{home_team} win": ("p_home", home_team),
+        "Draw":             ("p_draw", "Draw"),
+        f"{away_team} win": ("p_away", away_team),
+    }
+    with pick_col:
+        chosen = st.selectbox("Selection", list(outcome_options),
+                              index=int(np.argmax([priced["p_home"], priced["p_draw"],
+                                                   priced["p_away"]])))
+    with add_col:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("➕  Add to slip"):
+            key, _team = outcome_options[chosen]
+            st.session_state.intl_slip.append({
+                "fixture":   f"{home_team} v {away_team}",
+                "selection": chosen,
+                "prob":      float(priced[key]),
+                "venue":     "Neutral" if neutral else home_team,
+            })
+            st.rerun()
+
+    slip = st.session_state.intl_slip
+    if not slip:
+        render_html("""
+        <div style="background:#0d1525; border:1px dashed #1e2d45; border-radius:8px;
+                    padding:18px; text-align:center; color:#8892a4; font-size:0.78rem;">
+            No legs yet. Price a pairing above and add it.
+        </div>
+        """)
+    else:
+        # Legs are treated as independent, which is fair here: separate
+        # international fixtures share no pitch, squad or weather. The same
+        # assumption is shakier on a single-day club card.
+        combined = 1.0
+        for leg in slip:
+            combined *= leg["prob"]
+
+        legs_html = "".join(f"""
+            <div style="display:flex; justify-content:space-between; align-items:center;
+                        padding:8px 0; border-bottom:1px solid #1a2438;">
+                <div>
+                    <div style="font-size:0.84rem; font-weight:700; color:#e8eaf0;">
+                        {leg['selection']}</div>
+                    <div style="font-size:0.68rem; color:#8892a4;">
+                        {leg['fixture']} · {leg['venue']}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="color:#00ff88; font-weight:700;">{leg['prob']*100:.1f}%</div>
+                    <div style="font-size:0.68rem; color:#f5d020;">fair {1/leg['prob']:.2f}</div>
+                </div>
+            </div>
+        """ for leg in slip)
+
+        render_html(f"""
+        <div class="selected-panel">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <h4>📋 International Slip</h4>
+                <div style="text-align:right;">
+                    <div style="font-size:0.65rem; color:#8892a4;
+                                text-transform:uppercase;">Fair total odds</div>
+                    <div style="font-size:2rem; font-weight:800; color:#f5d020; line-height:1;">
+                        {1/combined:.2f}</div>
+                </div>
+            </div>
+            {legs_html}
+            <div style="display:flex; gap:32px; margin-top:12px; padding-top:10px;
+                        border-top:1px solid #1e2d45;">
+                <div>
+                    <div style="font-size:0.65rem; color:#8892a4;
+                                text-transform:uppercase;">Combined probability</div>
+                    <div style="font-size:1.3rem; font-weight:700; color:#00ff88;">
+                        {combined*100:.1f}%</div>
+                </div>
+                <div>
+                    <div style="font-size:0.65rem; color:#8892a4;
+                                text-transform:uppercase;">Legs</div>
+                    <div style="font-size:1.3rem; font-weight:700; color:#a78bfa;">{len(slip)}</div>
+                </div>
+            </div>
+        </div>
+        """)
+
+        clear_col, _ = st.columns([1, 3])
+        with clear_col:
+            if st.button("✕  Clear slip"):
+                st.session_state.intl_slip = []
+                st.rerun()
+
     render_html('<div class="section-header"><h3>Recent Form</h3></div>')
     form_left, form_right = st.columns(2)
     for column, team in ((form_left, home_team), (form_right, away_team)):
@@ -831,6 +927,101 @@ if live_mode:
         )}
     </div>
     """)
+
+# ============================================================
+#  TODAY'S BEST — top picks and ready-made slips
+# ============================================================
+# "Best" means the model's most confident, NOT the best value: value is a
+# comparison against a price, and no odds source here covers these fixtures.
+label_column = "selection_label" if result_mode else None
+top_picks    = rank_picks(all_matches_df, top_n=5)
+daily_slips  = build_daily_slips(all_matches_df, label_column=label_column)
+
+render_html(f"""
+<div class="section-header"><h3>★ {live_meta['day']:%A %d %B} · Best {len(top_picks)} Picks</h3></div>
+""" if live_mode else '<div class="section-header"><h3>★ Best Picks</h3></div>')
+
+if top_picks.empty:
+    render_html("""
+    <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
+                padding:14px; color:#f5d020; font-size:0.8rem;">
+        Nothing on this card could be priced.
+    </div>
+    """)
+else:
+    pick_cards = ""
+    for rank, pick in enumerate(top_picks.itertuples(index=False), 1):
+        band, colour = confidence_band(pick.btts_prob)
+        headline = (getattr(pick, "selection_label", None)
+                    if result_mode else f"{pick.home_team} vs {pick.away_team}")
+        pick_cards += f"""
+        <div style="display:flex; align-items:center; gap:14px; padding:10px 14px;
+                    background:#111827; border:1px solid #1e2d45;
+                    border-left:3px solid {colour}; border-radius:6px; margin-bottom:8px;">
+            <div style="font-size:1.1rem; font-weight:800; color:{colour}; min-width:26px;">
+                {rank}</div>
+            <div style="flex:1;">
+                <div style="font-size:0.9rem; font-weight:700; color:#e8eaf0;">{headline}</div>
+                <div style="font-size:0.68rem; color:#8892a4;">
+                    {pick.home_team} vs {pick.away_team} · {pick.league} · {pick.kickoff}
+                </div>
+            </div>
+            <div style="text-align:right;">
+                <div style="font-size:1.2rem; font-weight:800; color:{colour};">
+                    {pick.btts_prob*100:.1f}%</div>
+                <div style="font-size:0.66rem; color:#8892a4;">{band} · fair
+                    <strong style="color:#f5d020;">{pick.fair_odds}</strong></div>
+            </div>
+        </div>
+        """
+    render_html(pick_cards)
+
+# --- ready-made slips ---
+render_html('<div class="section-header"><h3>★ Daily Slips</h3></div>')
+
+if not daily_slips:
+    render_html("""
+    <div style="background:#1a1400; border:1px solid #f5d02044; border-radius:6px;
+                padding:14px; color:#f5d020; font-size:0.8rem;">
+        Not enough priced fixtures on this card to build a slip.
+    </div>
+    """)
+else:
+    slip_columns = st.columns(len(daily_slips))
+    for column, slip in zip(slip_columns, daily_slips):
+        with column:
+            legs_html = "".join(f"""
+                <div style="display:flex; justify-content:space-between; gap:8px;
+                            padding:5px 0; border-bottom:1px solid #1a2438;
+                            font-size:0.72rem;">
+                    <span style="color:#e8eaf0;">{selection}</span>
+                    <span style="color:#8892a4; white-space:nowrap;">{prob}%</span>
+                </div>
+            """ for selection, prob in zip(slip["selections"], slip["leg_probs"]))
+
+            render_html(f"""
+            <div style="background:#111827; border:1px solid #1e2d45; border-top:2px solid #7c3aed;
+                        border-radius:6px; padding:14px;">
+                <div style="font-size:0.8rem; font-weight:800; color:#a78bfa;
+                            text-transform:uppercase; letter-spacing:0.08em;">{slip['name']}</div>
+                <div style="font-size:0.66rem; color:#8892a4; margin-bottom:8px;">{slip['note']}</div>
+                {legs_html}
+                <div style="display:flex; justify-content:space-between; margin-top:10px;
+                            font-size:0.7rem; color:#8892a4;">
+                    <span>Combined <strong style="color:#00ff88;">{slip['combined_prob']}%</strong></span>
+                    <span>Fair total <strong style="color:#f5d020;">{slip['total_fair_odds']}</strong></span>
+                </div>
+            </div>
+            """)
+
+    render_html("""
+    <div style="font-size:0.68rem; color:#8892a4; margin-top:10px;">
+        Ranked by model confidence, not by value — value needs a price to compare against,
+        and none is available here. Fair totals carry no bookmaker margin, so a real slip
+        pays less than shown.
+    </div>
+    """)
+
 
 # ============================================================
 #  SECTION 1: ALL MATCHES TABLE
