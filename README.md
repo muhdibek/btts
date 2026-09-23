@@ -21,7 +21,11 @@ btts_dashboard/
 │
 ├── models/
 │   ├── __init__.py
-│   └── btts_model.py             ← BTTS probability model (Phase 1: heuristic, Phase 2: XGBoost)
+│   ├── btts_model.py             ← Dashboard's heuristic model
+│   ├── goal_models.py            ← Poisson / Dixon-Coles / negative binomial / Skellam
+│   ├── evaluate.py               ← Log loss, Brier, calibration, ROI
+│   ├── synthetic.py              ← Match generators with a known process
+│   └── bakeoff.py                ← CLI: score the models head to head
 │
 ├── utils/
 │   ├── __init__.py
@@ -30,7 +34,8 @@ btts_dashboard/
 │   └── api_client.py             ← API-Football integration (Phase 2)
 │
 ├── tests/
-│   └── test_dataset.py           ← Pipeline tests (leakage, Elo, parsing)
+│   ├── test_dataset.py           ← Pipeline tests (leakage, Elo, parsing)
+│   └── test_bakeoff.py           ← Model tests (recovering a known process)
 │
 ├── requirements.txt
 └── README.md
@@ -239,6 +244,73 @@ Two rules for whatever trains on this:
 ### Phase 2C — Historical Data Source
 - [football-data.co.uk](https://www.football-data.co.uk) — free CSV files with match results
 - Use to build your labelled training set for the XGBoost model
+
+---
+
+## Model Bake-off
+
+Four distributional models, one interface, scored head to head. Every market is
+derived from the same scoreline distribution, so the models differ in their
+assumption about goals — not in how their output is post-processed.
+
+```
+P(BTTS)    = Σ P(H=i, A=j)  for i ≥ 1, j ≥ 1
+P(over2.5) = Σ P(H=i, A=j)  for i + j ≥ 3
+P(home)    = Σ P(H=i, A=j)  for i > j
+```
+
+| Model | Assumption | BTTS? |
+|---|---|---|
+| `base_rate` | every match gets the training base rate | the floor to beat |
+| `team_rate` | mean of the two sides' historical BTTS rates | the dashboard's strongest heuristic term, isolated |
+| `poisson` | independent Poisson, log-linear attack/defence/home advantage, fitted by MLE | yes |
+| `dixon_coles` | Poisson + the low-score correction on the 0-0, 1-0, 0-1 and 1-1 cells, + optional time decay | yes |
+| `negative_binomial` | same means, variance λ + λ²/r, for overdispersed goals | yes |
+| `skellam` | models the goal *difference* | **no** — reports NaN |
+
+Skellam is the honest exception. A difference distribution cannot say whether
+both teams scored, because 0-0 and 1-1 are the same difference. It prices 1X2
+and handicaps; on BTTS it reports NaN and the bake-off leaves it unscored
+rather than substituting a guess.
+
+### Running it
+
+```bash
+python -m models.bakeoff --synthetic poisson            # validate on known truth
+python -m models.bakeoff --synthetic negative_binomial --repeats 5
+python -m models.bakeoff --data data/processed/btts_dataset.csv --calibration
+python -m models.bakeoff --synthetic dixon_coles --market p_draw
+```
+
+The split is always by **date**. On synthetic data the table also carries an
+**ORACLE** row — the generating process's own probabilities — which is the
+ceiling no model can beat and the measure of how much remaining loss is
+irreducible noise rather than model error.
+
+### Validating the harness
+
+Before trusting a bake-off on real results, it has to recover a process it was
+given. `models/synthetic.py` generates matches from a stated process, and
+`tests/test_bakeoff.py` asserts the harness gets each one right:
+
+| Data generated from | Expected result | Observed (5 leagues each) |
+|---|---|---|
+| Poisson | Poisson wins; negative binomial ties it by fitting r → ∞ | all three tie at 0.638 log loss; fitted r hits its 500 ceiling |
+| Negative binomial (r = 2.5) | negative binomial wins | wins 4/5, mean log loss 0.666 vs Poisson 0.700; recovered r = 3.3 |
+| Dixon-Coles (ρ = −0.30) | Dixon-Coles wins | wins 5/5, log loss 0.625 vs Poisson 0.628; recovered ρ = −0.30 |
+
+Two findings worth carrying into any real run:
+
+- **Single runs are noise.** At ~285 test matches the standard deviation of log
+  loss across seeds is ±0.01 — larger than the gap between most of these
+  models. A model can even score below the oracle on a lucky sample. Use
+  `--repeats` and read the win counts, not one table.
+- **The Dixon-Coles correction is small.** At ρ = −0.15 over 1,140 matches it is
+  undetectable on BTTS; it only separates cleanly at ρ = −0.30 with 3,000+
+  matches, and it shows up most strongly on the draw market rather than BTTS.
+- **"Variance > mean" does not prove overdispersion.** Poisson-generated
+  matches here show variance/mean ≈ 1.18, because λ varies between matches.
+  Only a fitted r says whether goals are genuinely overdispersed.
 
 ---
 
