@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from models.bakeoff import run_bakeoff, split_by_date                  # noqa: E402
 from models.evaluate import (betting_roi, brier_score,                 # noqa: E402
                              calibration_table, expected_calibration_error,
-                             log_loss, skill_score)
+                             log_loss, roc_auc, skill_score)
 from models.goal_models import (build_model, markets_from_grid)        # noqa: E402
 from models.synthetic import simulate_league, summarise_dispersion     # noqa: E402
 
@@ -98,6 +98,25 @@ def test_calibration_table_finds_a_biased_model():
     assert table["n"].sum() == 2000
     assert table["gap"].iloc[0] == pytest.approx(0.4, abs=0.05)
     assert expected_calibration_error(overconfident, outcomes) == pytest.approx(0.4, abs=0.05)
+
+
+def test_auc_measures_ranking_not_scaling():
+    outcomes = np.array([0, 0, 1, 1])
+    assert roc_auc(np.array([0.1, 0.2, 0.8, 0.9]), outcomes) == pytest.approx(1.0)
+    assert roc_auc(np.array([0.9, 0.8, 0.2, 0.1]), outcomes) == pytest.approx(0.0)
+
+    # Ranking is scale-free: squashing the probabilities changes log loss but
+    # not the order, so AUC is unmoved.
+    assert roc_auc(np.array([0.49, 0.50, 0.51, 0.52]), outcomes) == pytest.approx(1.0)
+
+
+def test_auc_of_a_constant_prediction_is_a_coin_flip():
+    """Tied predictions must average to 0.5, not land on an arbitrary value."""
+    assert roc_auc(np.full(4, 0.5), np.array([0, 1, 0, 1])) == pytest.approx(0.5)
+
+
+def test_auc_needs_both_outcomes():
+    assert np.isnan(roc_auc(np.array([0.3, 0.6]), np.array([1, 1])))
 
 
 def test_betting_roi_only_bets_on_an_edge():

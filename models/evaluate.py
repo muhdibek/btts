@@ -18,6 +18,9 @@ rules punish that, so the bake-off is scored on:
              and "happened 60% of the time". A model can rank matches well and
              still be badly calibrated, and calibration is what multiplies
              through an accumulator
+  AUC        ranking ability, independent of scaling — it says whether a model
+             that loses on log loss has a real signal that calibration could
+             rescue, or no signal at all
   ROI        flat-stake return when a price is available, betting only where
              the model's edge over the implied probability clears a threshold
 
@@ -70,6 +73,44 @@ def skill_score(probs, outcomes, baseline_probs) -> float:
     if not np.isfinite(model) or not np.isfinite(baseline) or baseline <= 0:
         return np.nan
     return float(1.0 - model / baseline)
+
+
+def roc_auc(probs, outcomes) -> float:
+    """
+    Area under the ROC curve — the probability that a randomly chosen match
+    where the event happened was ranked above one where it did not.
+
+    This separates two very different failures. A model can rank matches
+    correctly and still lose on log loss because its probabilities are badly
+    scaled (fixable by calibration), or it can have no ranking ability at all
+    (nothing to fix). 0.5 is a coin flip.
+
+    Computed from rank statistics, with ties averaged, so no sklearn needed.
+    """
+    p, y, _ = _clean(probs, outcomes)
+    if p.size == 0:
+        return np.nan
+
+    positives = y > 0
+    n_pos, n_neg = int(positives.sum()), int((~positives).sum())
+    if n_pos == 0 or n_neg == 0:
+        return np.nan
+
+    order = np.argsort(p, kind="mergesort")
+    ranks = np.empty(p.size, dtype=float)
+    ranks[order] = np.arange(1, p.size + 1)
+
+    # Average the ranks within ties, or a model that predicts one constant
+    # value would score an arbitrary AUC instead of 0.5.
+    sorted_p = p[order]
+    start = 0
+    for end in range(1, p.size + 1):
+        if end == p.size or sorted_p[end] != sorted_p[start]:
+            if end - start > 1:
+                ranks[order[start:end]] = ranks[order[start:end]].mean()
+            start = end
+
+    return float((ranks[positives].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
 
 
 def calibration_table(probs, outcomes, bins: int = 10) -> pd.DataFrame:
@@ -162,6 +203,7 @@ def evaluate(probs, outcomes, baseline_probs=None, odds=None,
         "n":          int(p.size),
         "log_loss":   log_loss(probs, outcomes),
         "brier":      brier_score(probs, outcomes),
+        "auc":        roc_auc(probs, outcomes),
         "ece":        expected_calibration_error(probs, outcomes, bins),
         "mean_pred":  float(p.mean()) if p.size else np.nan,
         "observed":   float(y.mean()) if p.size else np.nan,

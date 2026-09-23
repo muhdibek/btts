@@ -52,6 +52,19 @@ MARKET_OUTCOMES = {
 }
 
 
+def to_datetime(values: pd.Series) -> pd.Series:
+    """
+    Parse kickoffs from any source.
+
+    A CSV round-trip leaves a mix of "2019-08-09" and "2019-08-09 15:00:00" in
+    one column, and pandas infers a single format from the first value and then
+    fails on the rest — so the format is stated rather than inferred.
+    """
+    if pd.api.types.is_datetime64_any_dtype(values):
+        return values
+    return pd.to_datetime(values, format="ISO8601", errors="coerce")
+
+
 def split_by_date(matches: pd.DataFrame, fraction: float = 0.75
                   ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Earliest `fraction` of matches to train, the rest to test."""
@@ -82,7 +95,7 @@ def run_bakeoff(
                          f"choose from {', '.join(MARKET_OUTCOMES)}")
 
     matches = matches.copy()
-    matches["kickoff"] = pd.to_datetime(matches["kickoff"])
+    matches["kickoff"] = to_datetime(matches["kickoff"])
     train, test = split_by_date(matches, split)
 
     outcomes = MARKET_OUTCOMES[market](test).to_numpy()
@@ -121,6 +134,94 @@ def run_bakeoff(
 
     scorecard = pd.DataFrame(rows)
     return scorecard.sort_values("log_loss", na_position="last").reset_index(drop=True), predictions
+
+
+def run_walk_forward(
+    matches:      pd.DataFrame,
+    market:       str = "p_btts",
+    model_names:  list[str] | None = None,
+    min_train_matches: int = 1500,
+    half_life_days: float | None = None,
+    verbose:      bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Refit every season and predict the one that follows.
+
+    A single split freezes the model at one moment and asks it to predict years
+    of football that came after — squads turn over, tactics move, scoring rates
+    drift. That measures staleness as much as model quality. Walk-forward is
+    what a model would actually have done: at the start of each season, fit on
+    everything played so far, predict that season, then move on.
+
+    It also gives far more out-of-sample matches to score, which matters given
+    how much sampling noise sits in a few hundred.
+
+    Args:
+        matches:           played matches with a kickoff column
+        market:            market to score
+        model_names:       models to run (default: all)
+        min_train_matches: seasons are skipped until this much history exists
+        half_life_days:    optional recency weighting inside each refit
+
+    Returns:
+        (scorecard, predictions) — pooled out-of-sample scores, and a frame of
+        every prediction with its season, for per-season inspection.
+    """
+    matches = matches.copy()
+    matches["kickoff"] = to_datetime(matches["kickoff"])
+    matches = matches.sort_values("kickoff").reset_index(drop=True)
+
+    if "season" not in matches.columns or matches["season"].isna().all():
+        year = matches["kickoff"].dt.year
+        matches["season"] = np.where(matches["kickoff"].dt.month >= 7, year, year - 1)
+
+    seasons = list(dict.fromkeys(matches["season"].tolist()))
+    names   = model_names or list(MODELS)
+    records: list[pd.DataFrame] = []
+
+    for season in seasons:
+        train = matches[matches["season"] < season] if isinstance(season, (int, np.integer)) \
+                else matches[matches["kickoff"] < matches.loc[matches["season"] == season,
+                                                              "kickoff"].min()]
+        test = matches[matches["season"] == season]
+
+        if len(train) < min_train_matches or test.empty:
+            continue
+
+        block = pd.DataFrame({
+            "season":  test["season"].to_numpy(),
+            "outcome": MARKET_OUTCOMES[market](test).to_numpy(),
+        })
+
+        for name in names:
+            kwargs = {}
+            if half_life_days is not None and name != "base_rate" and name != "team_rate":
+                kwargs["half_life_days"] = half_life_days
+            model = build_model(name, **kwargs).fit(train)
+            block[name] = model.predict_frame(test)[market].to_numpy()
+
+        records.append(block)
+        if verbose:
+            print(f"  season {season}: trained on {len(train):,}, "
+                  f"predicted {len(test):,}")
+
+    if not records:
+        raise ValueError("not enough history for a walk-forward run — "
+                         "lower --min-train-matches")
+
+    predictions = pd.concat(records, ignore_index=True)
+    outcomes    = predictions["outcome"].to_numpy()
+    baseline    = predictions["base_rate"].to_numpy() if "base_rate" in predictions else None
+
+    rows = []
+    for name in names:
+        card = {"model": name}
+        card.update(evaluate(predictions[name].to_numpy(), outcomes,
+                             baseline_probs=baseline))
+        rows.append(card)
+
+    scorecard = pd.DataFrame(rows).sort_values("log_loss", na_position="last")
+    return scorecard.reset_index(drop=True), predictions
 
 
 def run_repeated(
@@ -183,7 +284,7 @@ def _fitted_parameters(model) -> dict[str, float]:
 def format_scorecard(scorecard: pd.DataFrame) -> str:
     """Render the table for the terminal."""
     show = scorecard.copy()
-    for col in ("log_loss", "brier", "ece", "mean_pred", "observed",
+    for col in ("log_loss", "brier", "auc", "ece", "mean_pred", "observed",
                 "skill_vs_baseline"):
         if col in show.columns:
             show[col] = show[col].astype(float).round(4)
@@ -200,12 +301,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="generate matches from a known process instead")
 
     parser.add_argument("--market", default="p_btts", choices=list(MARKET_OUTCOMES))
+    parser.add_argument("--division", default=None,
+                        help="restrict to one division code (e.g. E0). Leagues differ in "
+                             "scoring rate, so pooling them into a single intercept "
+                             "misfits every one of them.")
     parser.add_argument("--split", type=float, default=0.75,
                         help="fraction of matches (by date) used for training")
     parser.add_argument("--models", nargs="+", default=None,
                         help=f"subset to run (default: all — {', '.join(MODELS)})")
     parser.add_argument("--half-life", type=float, default=None,
                         help="days; down-weight older training matches")
+    parser.add_argument("--walk-forward", action="store_true",
+                        help="refit each season and predict the next, instead of one "
+                             "fixed split (slower, and much closer to real use)")
+    parser.add_argument("--min-train-matches", type=int, default=1500,
+                        help="walk-forward: history required before scoring a season")
     parser.add_argument("--calibration", action="store_true",
                         help="print the calibration table for the best model")
     parser.add_argument("--seasons", type=int, default=3, help="synthetic: seasons")
@@ -247,6 +357,26 @@ def main(argv: list[str] | None = None) -> int:
     else:
         matches = pd.read_csv(args.data)
         print(f"Loaded {len(matches):,} matches from {args.data}")
+        if args.division:
+            matches = matches[matches["div"] == args.division].reset_index(drop=True)
+            print(f"Filtered to division {args.division}: {len(matches):,} matches")
+        if matches.empty:
+            print("No matches left after filtering.", file=sys.stderr)
+            return 1
+
+    if args.walk_forward:
+        print(f"\nWalk-forward · market: {args.market}\n")
+        scorecard, wf_predictions = run_walk_forward(
+            matches, market=args.market, model_names=args.models,
+            min_train_matches=args.min_train_matches,
+            half_life_days=args.half_life,
+        )
+        print(f"\nPooled out-of-sample: {len(wf_predictions):,} matches "
+              f"across {wf_predictions['season'].nunique()} seasons\n")
+        print(format_scorecard(scorecard))
+        print("\nlog_loss / brier / ece: lower is better. "
+              "skill_vs_baseline: > 0 beats the base rate.")
+        return 0
 
     scorecard, predictions = run_bakeoff(
         matches, market=args.market, split=args.split,
@@ -264,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         best = scorecard.loc[scorecard["log_loss"].idxmin(), "model"]
         if best in predictions:
             _, test = split_by_date(matches.assign(
-                kickoff=pd.to_datetime(matches["kickoff"])), args.split)
+                kickoff=to_datetime(matches["kickoff"])), args.split)
             outcomes = MARKET_OUTCOMES[args.market](test).to_numpy()
             print(f"\nCalibration — {best}")
             print(calibration_table(predictions[best], outcomes).to_string(index=False))

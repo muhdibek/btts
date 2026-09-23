@@ -314,6 +314,76 @@ Two findings worth carrying into any real run:
 
 ---
 
+## Results on Real Matches
+
+Run over **154,269 real matches** (1993 – Jan 2021, 22 divisions, BTTS base rate
+51.4%), sourced from a public mirror of the football-data.co.uk archive:
+
+```bash
+git clone --depth 1 https://github.com/jokecamp/FootballData.git
+python -m data.build_dataset --from-dir FootballData/football-data.co.uk \
+    --out data/processed/btts_dataset.csv
+python -m models.bakeoff --data data/processed/btts_dataset.csv \
+    --division E0 --walk-forward
+```
+
+Walk-forward: refit at the start of each season on everything played before it,
+predict that season. 8,770 out-of-sample Premier League matches, 24 seasons.
+
+### Both teams to score
+
+| Model | log loss | AUC | skill vs base rate |
+|---|---|---|---|
+| **base_rate** | **0.6933** | 0.491 | — |
+| team_rate | 0.6942 | 0.507 | −0.0013 |
+| dixon_coles | 0.6952 | 0.513 | −0.0028 |
+| poisson | 0.6956 | 0.513 | −0.0033 |
+| negative_binomial | 0.6958 | 0.513 | −0.0037 |
+
+**Nothing beats the base rate.** Every model scores worse than predicting the
+league's BTTS rate for every match. The same holds on over/under 2.5 goals, and
+in the Bundesliga and La Liga.
+
+### Match result, same models, same fits
+
+| Model | log loss | AUC | skill vs base rate |
+|---|---|---|---|
+| poisson / negative_binomial / skellam | 0.6434 | **0.672** | **+0.069** |
+| dixon_coles | 0.6436 | 0.672 | +0.068 |
+| base_rate | 0.6908 | 0.489 | — |
+
+The machinery works. Team strength predicts **who wins** — AUC 0.672, a large
+and stable edge. It does not predict **whether both teams score** — AUC 0.513,
+which is a coin flip with a rounding error.
+
+That asymmetry is the real finding, and it is not a bug in any of these models:
+a strong side beating a weak one 3-0 rather than 3-1 is close to a coin toss,
+and BTTS turns entirely on that coin. Knowing Manchester City are far better
+than Burnley tells you a great deal about the winner and almost nothing about
+whether Burnley score once.
+
+### What this means for the dashboard
+
+The BTTS slip builder multiplies per-leg probabilities that, on this evidence,
+carry no more information than the league base rate. A 6-leg accumulator built
+from them is not a model-selected bet — it is the base rate raised to the sixth
+power, dressed up with decimals. The honest options are to price the legs at the
+base rate and stop implying an edge, to find features these models do not carry
+(team news, lineups, motivation, weather), or to move the app to the market
+where the signal demonstrably is: match result.
+
+### Caveats
+
+- The mirror stops in **January 2021**, so none of this covers recent seasons.
+- **No BTTS odds** anywhere in the archive, so there is no ROI backtest and no
+  market baseline for this market — only the base rate.
+- Tested here: Poisson, Dixon-Coles, negative binomial, Skellam. A gradient-
+  boosted model on richer features might find signal these cannot. Nothing here
+  says BTTS is unpredictable in principle — only that these four models, fitted
+  this way, do not predict it.
+
+---
+
 ## Responsible Gambling Note
 
 This dashboard is a **probability analysis tool** for research and educational purposes.

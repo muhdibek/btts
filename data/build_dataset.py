@@ -31,8 +31,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from data.football_data import (CACHE_DIR, LEAGUES, load_matches,      # noqa: E402
-                                parse_season_csv, season_label)
+from data.football_data import (CACHE_DIR, LEAGUES, load_directory,    # noqa: E402
+                                load_matches, parse_season_csv, season_label)
 from data.features import build_features, feature_columns              # noqa: E402
 
 
@@ -97,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="where raw season CSVs are cached")
     parser.add_argument("--from-cache", action="store_true",
                         help="build from cached CSVs only, without downloading")
+    parser.add_argument("--from-dir", type=Path, default=None,
+                        help="build from a directory tree of football-data.co.uk CSVs "
+                             "(e.g. a local mirror) instead of downloading")
     parser.add_argument("--force", action="store_true",
                         help="re-download seasons already cached")
     parser.add_argument("--min-history", type=int, default=0,
@@ -110,7 +113,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {code:<4} {name}")
         return 0
 
-    if args.from_cache:
+    if args.from_dir:
+        print(f"Loading football-data.co.uk CSVs under {args.from_dir} …")
+        matches = load_directory(args.from_dir)
+    elif args.from_cache:
         print(f"Loading cached CSVs from {args.cache_dir} …")
         matches = load_from_cache(args.cache_dir)
     else:

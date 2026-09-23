@@ -234,6 +234,75 @@ def parse_season_csv(path: Path | str, start_year: int | None = None) -> pd.Data
     return out.sort_values("kickoff").reset_index(drop=True)
 
 
+def _season_from_kickoffs(kickoffs: pd.Series) -> str:
+    """
+    Infer the season label from the matches themselves.
+
+    Used when files are loaded from a directory whose names carry no season
+    code. A European season runs August-May, so a match in July or later
+    belongs to the season starting that year.
+    """
+    if kickoffs.empty:
+        return ""
+    median = kickoffs.sort_values().iloc[len(kickoffs) // 2]
+    start  = median.year if median.month >= 7 else median.year - 1
+    return season_label(start)
+
+
+def load_directory(
+    root:    Path | str,
+    pattern: str = "**/*.csv",
+    skip:    Sequence[str] = ("games.csv",),
+) -> pd.DataFrame:
+    """
+    Load every football-data.co.uk CSV under a directory tree.
+
+    The site's own filenames (E0_2425.csv) are not the only way these files
+    travel — mirrors rename them by country and season folder. This walks the
+    tree, parses whatever is in the site's format, takes the division from the
+    file's own Div column and the season from its dates, and drops duplicate
+    fixtures that appear in more than one file.
+
+    Args:
+        root:    directory to walk
+        pattern: glob for the CSVs beneath it
+        skip:    filenames to ignore (aggregates that duplicate the per-season
+                 files, and would otherwise double-count matches)
+
+    Returns:
+        One chronologically sorted match table, deduplicated.
+    """
+    root   = Path(root)
+    frames = []
+
+    for path in sorted(root.glob(pattern)):
+        if path.name in skip:
+            continue
+        try:
+            frame = parse_season_csv(path)
+        except Exception as exc:                      # malformed or unrelated CSV
+            print(f"  ! skipped {path.relative_to(root)}: {exc}")
+            continue
+        if frame.empty:
+            continue
+        frame["season"] = _season_from_kickoffs(frame["kickoff"])
+        frame["source"] = str(path.relative_to(root))
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    before   = len(combined)
+    combined = combined.drop_duplicates(
+        subset=["div", "kickoff", "home_team", "away_team"], keep="first"
+    )
+    if before != len(combined):
+        print(f"  dropped {before - len(combined):,} duplicate fixtures")
+
+    return combined.sort_values("kickoff").reset_index(drop=True)
+
+
 def load_matches(
     leagues:    Sequence[str],
     seasons:    Iterable[int],
